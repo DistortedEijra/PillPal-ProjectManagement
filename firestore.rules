@@ -1,0 +1,50 @@
+rules_version = '2';
+
+// PillPal Firestore rules.
+// Paste into Firebase console -> Firestore Database -> Rules -> Publish.
+// Each user owns their own data; linked caregivers can READ it, send reminders
+// (nudges), and link themselves only with a valid invite code.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function isCaregiverOf(uid) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(uid)/caregivers/$(request.auth.uid));
+    }
+
+    match /invites/{code} {
+      allow get: if signedIn();
+      allow create: if signedIn() && request.resource.data.patientUid == request.auth.uid;
+      allow delete: if signedIn() && resource.data.patientUid == request.auth.uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isCaregiverOf(uid);
+      allow write: if isOwner(uid);
+
+      // schedules, logs, alerts (and anything else under the user)
+      match /{sub}/{docId} {
+        allow read: if isOwner(uid) || isCaregiverOf(uid);
+        allow write: if isOwner(uid);
+      }
+
+      match /caregivers/{caregiverUid} {
+        allow read: if request.auth.uid == caregiverUid;
+        allow create: if signedIn() && request.auth.uid == caregiverUid &&
+          get(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.patientUid == uid;
+        allow delete: if signedIn() && request.auth.uid == caregiverUid;
+      }
+
+      match /patients/{patientUid} {
+        // the patient may remove a caregiver's link to them
+        allow delete: if signedIn() && request.auth.uid == patientUid;
+      }
+
+      match /nudges/{nudgeId} {
+        allow create: if isCaregiverOf(uid);
+      }
+    }
+  }
+}

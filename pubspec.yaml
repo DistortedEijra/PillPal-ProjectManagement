@@ -1,5 +1,5 @@
 name: myapp4
-description: "A new Flutter project."
+description: "PillPal: medicine reminder app with PillPalBox, Scan-to-Schedule, missed-dose escalation and caregiver mode."
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -28,6 +28,11 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_bluetooth_serial: ^0.4.0
   shared_preferences: ^2.2.3
+
+  # Scan-to-Schedule (OCR)
+  google_mlkit_text_recognition: ^0.15.0
+  image_picker: ^1.1.2
+  collection: ^1.18.0
 
 dev_dependencies:
   flutter_test:

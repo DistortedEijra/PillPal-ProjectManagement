@@ -23,6 +23,15 @@ class NotificationService {
 
   final StreamController<String?> tapPayloadController = StreamController<String?>.broadcast();
 
+  // Payload of the notification that cold-started the app (read once by the dashboard).
+  String? _launchPayload;
+  void setLaunchPayload(String? payload) => _launchPayload = payload;
+  String? takeLaunchPayload() {
+    final p = _launchPayload;
+    _launchPayload = null;
+    return p;
+  }
+
   static const String _logKeyPrefix = 'med_log_';
   static const String _weeklyLogKeyPrefix = 'med_weekly_';
   static const String _medicationCreatedKeyPrefix = 'med_created_';
@@ -220,6 +229,59 @@ class NotificationService {
       matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
     );
     print('DEBUG: Notification has been scheduled.');
+  }
+
+  // One-time notification at an exact moment (used for missed-dose follow-ups).
+  Future<void> scheduleOneTimeNotification({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime when,
+    String? payload,
+  }) async {
+    final tz.TZDateTime scheduled = tz.TZDateTime.from(when, tz.local);
+    if (scheduled.isBefore(tz.TZDateTime.now(tz.local))) return;
+
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _channelId,
+        _channelName,
+        channelDescription: _channelDescription,
+        importance: Importance.max,
+        priority: Priority.high,
+        icon: '@drawable/icon',
+        playSound: true,
+        sound: RawResourceAndroidNotificationSound('fahh_effect'),
+        fullScreenIntent: true,
+        enableLights: true,
+        groupKey: 'medicine_group',
+      ),
+      iOS: DarwinNotificationDetails(presentSound: true),
+    );
+
+    try {
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduled,
+        details,
+        payload: payload,
+        androidScheduleMode: AndroidScheduleMode.alarmClock,
+      );
+    } catch (e) {
+      // Exact alarms not allowed on this phone: fall back to an inexact alarm.
+      print('DEBUG: exact follow-up failed ($e), using inexact');
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduled,
+        details,
+        payload: payload,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      );
+    }
   }
 
   tz.TZDateTime _nextInstanceOfDayAndTime(int day, TimeOfDay time) {

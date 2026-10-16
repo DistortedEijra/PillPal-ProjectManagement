@@ -8,3 +8,10 @@
 -keep class io.flutter.plugin.common.**  { *; }
 # Added rule for flutter_local_notifications
 -keep class com.dexterous.flutterlocalnotifications.** { *; }
+
+# ML Kit text recognition (Scan-to-Schedule): only the Latin model is used
+-dontwarn com.google.mlkit.vision.text.chinese.**
+-dontwarn com.google.mlkit.vision.text.devanagari.**
+-dontwarn com.google.mlkit.vision.text.japanese.**
+-dontwarn com.google.mlkit.vision.text.korean.**
+-keep class com.google.mlkit.** { *; }

@@ -66,6 +66,9 @@ Future<void> _processNotificationLaunch(
 
   print("App launched from notification with payload: $payload");
 
+  // Let the dashboard show the confirmation / check-in dialog once it opens.
+  NotificationService().setLaunchPayload(payload);
+
   final slots = _extractSlotsFromPayload(payload);
   if (slots.isEmpty) {
     print("No valid slots extracted from payload.");

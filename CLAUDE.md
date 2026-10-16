@@ -30,6 +30,13 @@ now unused — safe to delete).
    `SharedPreferences`-based logging in `NotificationService`
    (`logMedicationTaken`, `getDailyLogs`, `getWeeklyLogs`, adherence rate).
 
+## Added features (2026-10)
+- `scan_to_schedule.dart` — Scan-to-Schedule: ML Kit OCR (`google_mlkit_text_recognition`) + `image_picker`; rule-based `PrescriptionParser` pre-fills name, dosage, times, days in the Add Schedule dialog (user confirms before saving).
+- `escalation_service.dart` — Missed-Dose Safety Escalation: pending doses in SharedPreferences, follow-ups at +10/+20 min, auto-missed at +30 min, check-in after 2 consecutive misses, caregiver alerts in `users/{uid}/alerts`. Also owns intake logging (`logIntake`).
+- `caregiver_service.dart` / `caregiver_page.dart` — Caregiver Companion Mode: invite codes (`invites/{code}`), `users/{patient}/caregivers`, `users/{caregiver}/patients`, nudges (`users/{patient}/nudges`), `CareListeners` shows nudges/alerts as local notifications while the app is open. "Care" button in the dashboard header.
+- `firestore.rules` — owner + linked-caregiver read rules; must be published in the Firebase console.
+- `time_utils.dart` — shared `formatTime12h`, `dateKey`, `stableId`.
+
 ## Architecture / key files (lib/)
 - `main.dart` — app entrypoint; initializes notifications, Firebase, App Check
   (debug provider), requests BT/notification permissions, handles cold-start

@@ -1,16 +1,18 @@
-# myapp4
+# PillPal
 
-A new Flutter project.
+Flutter + Firebase medicine reminder app that works with **PillPalBox**, a Bluetooth (HC-05) pill organizer whose LEDs show which compartment to open.
 
-## Getting Started
+## Features
+- Medicine schedules with alarm-style reminders, intake confirmation, and Daily/Weekly history
+- PillPalBox pairing and slot assignment (lights the right compartment at dose time)
+- **Scan-to-Schedule** — scan a prescription or label (Google ML Kit OCR, offline) to pre-fill the Add Schedule form
+- **Missed-Dose Safety Escalation** — follow-up reminders at +10 and +20 min, auto-marked missed at +30 min with a caregiver alert, and an "Are you okay?" check-in after 2 missed doses in a row (no answer in 15 min alerts the caregiver)
+- **Caregiver Companion Mode** — link a caregiver with a 6-character invite code; they see today's doses, 7-day adherence, and alerts, and can send a reminder
 
-This project is a starting point for a Flutter application.
+## Setup
+1. `flutter pub get`
+2. `android/app/google-services.json` holds the Firebase config (Firebase project `app-dev-thirdyear`).
+3. Publish `firestore.rules` in Firebase console → Firestore Database → Rules (needed for Caregiver mode).
+4. `flutter run`
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Note: alerts and caregiver reminders are delivered while the app is open (no Cloud Functions/FCM yet). Bluetooth does not work on the Android emulator.

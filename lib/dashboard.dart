@@ -13,6 +13,12 @@ import 'debug_bluetooth_page.dart';
 import 'package:intl/intl.dart';
 import 'package:collection/collection.dart';
 import 'dart:developer';
+import 'package:image_picker/image_picker.dart';
+import 'scan_to_schedule.dart';
+import 'escalation_service.dart';
+import 'caregiver_service.dart';
+import 'caregiver_page.dart';
+import 'time_utils.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -35,6 +41,8 @@ class _DashboardPageState extends State<DashboardPage> {
   bool isPillBoxConnected = false;
   String historyMode = 'Daily'; // Added for history sub-modes
   late StreamSubscription<String?> _notificationTapSubscription;
+  final CareListeners _careListeners = CareListeners();
+  bool _checkInDialogOpen = false;
 
   @override
   void initState() {
@@ -43,6 +51,13 @@ class _DashboardPageState extends State<DashboardPage> {
     _fetchUserData();
     _loadPairedDevice();
     _startScheduleTimer();
+    _careListeners.start();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final launchPayload = NotificationService().takeLaunchPayload();
+      if (launchPayload != null) _handleNotificationPayload(launchPayload);
+      await _runEscalationCheck();
+    });
 
     _connectionSubscription = BluetoothService().isConnectedStream.listen((isConnected) {
       if (mounted) {
@@ -61,7 +76,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
     _notificationTapSubscription = NotificationService().tapPayloadController.stream.listen((payload) {
       if (payload != null && mounted) {
-        _showConfirmationDialog(payload);
+        _handleNotificationPayload(payload);
       }
     });
 
@@ -79,6 +94,7 @@ class _DashboardPageState extends State<DashboardPage> {
     _connectionSubscription.cancel();
     _dataSubscription.cancel();
     _notificationTapSubscription.cancel();
+    _careListeners.stop();
     BluetoothService().dispose();
     super.dispose();
   }
@@ -115,13 +131,96 @@ class _DashboardPageState extends State<DashboardPage> {
     if (dueMedicines.isNotEmpty) {
       _triggerAlarm(dueMedicines, now);
     }
+
+    _runEscalationCheck();
+  }
+
+  // ---------- Missed-Dose Safety Escalation ----------
+  Future<void> _runEscalationCheck() async {
+    try {
+      final result = await EscalationService().processOverdue();
+      if (!mounted) return;
+      if (result.autoMissed.isNotEmpty) {
+        final names = result.autoMissed.map((d) => d.medicine).join(', ');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Marked as missed (no confirmation after 30 min): $names')),
+        );
+      }
+      if (result.needsCheckIn) _showCheckInDialog(result.missStreak);
+    } catch (e) {
+      log('Escalation check failed: $e');
+    }
+  }
+
+  void _handleNotificationPayload(String payload) {
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map && decoded['type'] == 'check_in') {
+        EscalationService().missStreak().then(_showCheckInDialog);
+        return;
+      }
+    } catch (_) {}
+    _showConfirmationDialog(payload);
+  }
+
+  void _showCheckInDialog(int streak) {
+    if (!mounted || _checkInDialogOpen) return;
+    _checkInDialogOpen = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Are you okay?'),
+        content: Text(
+          'You missed $streak dose(s) in a row.\n\n'
+          "Tap \"I'm okay\" so we don't alert your caregiver. "
+          'If you need help, tap "I need help" and your caregiver will be told right away.',
+        ),
+        actions: [
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () async {
+              Navigator.of(dialogContext).pop();
+              _checkInDialogOpen = false;
+              try {
+                await EscalationService().requestHelp();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Your caregiver has been alerted.')),
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Could not alert caregiver: $e')),
+                  );
+                }
+              }
+            },
+            child: const Text('I need help'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF116FA9),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              Navigator.of(dialogContext).pop();
+              _checkInDialogOpen = false;
+              await EscalationService().confirmOkay();
+            },
+            child: const Text("I'm okay"),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _triggerAlarm(List<Map<String, dynamic>> dueMedicines, DateTime now) async {
     if (!mounted) return;
 
-    final String scheduledTimeStr = TimeOfDay.fromDateTime(now).format(context);
-    final String dateStr = now.toIso8601String().split('T')[0];
+    final String scheduledTimeStr = formatTime(TimeOfDay.fromDateTime(now));
+    final String dateStr = dateKey(now);
 
     // Trigger hardware signals first
     for (var med in dueMedicines) {
@@ -176,6 +275,26 @@ class _DashboardPageState extends State<DashboardPage> {
       body: notificationBody,
       payload: payload,
     );
+
+    // Start the missed-dose escalation timer for each due medicine.
+    final due = DateTime(now.year, now.month, now.day, now.hour, now.minute);
+    try {
+      await EscalationService().startTracking(
+        medicinesPayload
+            .map((m) => PendingDose(
+                  medicine: m['name'] ?? '',
+                  dosage: m['dosage'] ?? '',
+                  slot: m['slot'] ?? '',
+                  date: dateStr,
+                  time: scheduledTimeStr,
+                  due: due,
+                ))
+            .toList(),
+        payload,
+      );
+    } catch (e) {
+      log('Could not start escalation tracking: $e');
+    }
   }
 
   Future<void> _showConfirmationDialog(String payload) async {
@@ -195,7 +314,7 @@ class _DashboardPageState extends State<DashboardPage> {
         : DateTime.now().toIso8601String().split('T')[0];
     final String time = (data['time'] as String?)?.isNotEmpty == true
         ? data['time'] as String
-        : TimeOfDay.fromDateTime(DateTime.now()).format(context);
+        : formatTime(TimeOfDay.fromDateTime(DateTime.now()));
 
     List<String> medicineNames = medicinesData.map((m) => m['name'] as String).toList();
 
@@ -210,9 +329,13 @@ class _DashboardPageState extends State<DashboardPage> {
               child: const Text('No'),
               onPressed: () {
                 Navigator.of(context).pop();
-                // Optionally log as missed
                 for (var medData in medicinesData) {
-                  _logIntake(date, medData['name'], time, 'missed');
+                  EscalationService().resolve(
+                    medicine: medData['name'] as String,
+                    date: date,
+                    time: time,
+                    taken: false,
+                  );
                 }
               },
             ),
@@ -221,7 +344,12 @@ class _DashboardPageState extends State<DashboardPage> {
               onPressed: () {
                 Navigator.of(context).pop();
                 for (var medData in medicinesData) {
-                  _logIntake(date, medData['name'], time, 'on_time');
+                  EscalationService().resolve(
+                    medicine: medData['name'] as String,
+                    date: date,
+                    time: time,
+                    taken: true,
+                  );
                 }
               },
             ),
@@ -229,16 +357,6 @@ class _DashboardPageState extends State<DashboardPage> {
         );
       },
     );
-  }
-
-  Future<void> _logIntake(String date, String medicine, String time, String status) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      final docRef = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('logs').doc(date);
-      await docRef.set({
-        'intakes': FieldValue.arrayUnion([{'medicine': medicine, 'time': time, 'status': status}])
-      }, SetOptions(merge: true));
-    }
   }
 
   Future<void> _loadPairedDevice() async {
@@ -360,17 +478,54 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   void _addMedicine() {
-    String? selectedMedicine;
+    final nameController = TextEditingController();
     final dosageController = TextEditingController();
     List<String> selectedDays = [];
     List<TimeOfDay> schedules = [const TimeOfDay(hour: 12, minute: 0)];
     List<String> availableMedicines =
-    pillBoxAssignments.map((e) => e['medicine'] ?? '').where((m) => m.isNotEmpty).toList();
+    pillBoxAssignments.map((e) => e['medicine'] ?? '').where((m) => m.trim().isNotEmpty).toList();
+    bool isScanning = false;
+    String? scanNote;
 
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return StatefulBuilder(builder: (context, setStateDialog) {
+          // ---------- Scan-to-Schedule ----------
+          Future<void> runScan(ImageSource source) async {
+            setStateDialog(() {
+              isScanning = true;
+              scanNote = null;
+            });
+            try {
+              final result = await PrescriptionScanner.scan(source);
+              if (!context.mounted) return;
+              if (result == null) {
+                setStateDialog(() => isScanning = false);
+                return;
+              }
+              setStateDialog(() {
+                isScanning = false;
+                if (result.name != null) {
+                  // Use the PillPalBox spelling if it matches, so the right slot lights up.
+                  final match = availableMedicines.firstWhereOrNull(
+                      (m) => m.toLowerCase() == result.name!.toLowerCase());
+                  nameController.text = match ?? result.name!;
+                }
+                if (result.dosage != null) dosageController.text = result.dosage!;
+                if (result.foundFrequency) schedules = List.of(result.times);
+                selectedDays = List.of(result.days);
+                scanNote = result.summary;
+              });
+            } catch (e) {
+              if (!context.mounted) return;
+              setStateDialog(() {
+                isScanning = false;
+                scanNote = 'Scan failed: $e';
+              });
+            }
+          }
+
           return AlertDialog(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text('Add New Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -379,15 +534,63 @@ class _DashboardPageState extends State<DashboardPage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  DropdownButtonFormField<String>(
-                    value: selectedMedicine,
-                    hint: const Text('Select Medicine'),
-                    items: availableMedicines
-                        .map((med) => DropdownMenuItem(value: med, child: Text(med)))
-                        .toList(),
-                    onChanged: (value) => setStateDialog(() => selectedMedicine = value),
-                    decoration: const InputDecoration(border: OutlineInputBorder()),
+                  const Text('Scan a prescription or label', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: isScanning ? null : () => runScan(ImageSource.camera),
+                          icon: const Icon(Icons.document_scanner),
+                          label: const Text('Camera'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: isScanning ? null : () => runScan(ImageSource.gallery),
+                          icon: const Icon(Icons.photo_library),
+                          label: const Text('Gallery'),
+                        ),
+                      ),
+                    ],
                   ),
+                  if (isScanning)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: LinearProgressIndicator(),
+                    ),
+                  if (scanNote != null)
+                    Container(
+                      margin: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF116FA9).withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(scanNote!, style: const TextStyle(fontSize: 13)),
+                    ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Medicine name',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  if (availableMedicines.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    const Text('In your PillPalBox:', style: TextStyle(fontSize: 12, color: Colors.black54)),
+                    Wrap(
+                      spacing: 6,
+                      children: availableMedicines
+                          .map((m) => ActionChip(
+                                label: Text(m),
+                                onPressed: () => setStateDialog(() => nameController.text = m),
+                              ))
+                          .toList(),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   TextField(
                     controller: dosageController,
@@ -464,9 +667,12 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
               ElevatedButton(
                 onPressed: () async {
-                  if (selectedMedicine != null &&
-                      dosageController.text.isNotEmpty &&
-                      selectedDays.isNotEmpty) {
+                  final String selectedMedicine = nameController.text.trim();
+                  if (selectedMedicine.isEmpty ||
+                      dosageController.text.trim().isEmpty ||
+                      selectedDays.isEmpty) {
+                    setStateDialog(() => scanNote = 'Please fill in the medicine name, dosage, and at least one day.');
+                  } else {
                     final user = FirebaseAuth.instance.currentUser;
                     if (user == null) return;
 
@@ -1073,6 +1279,13 @@ class _DashboardPageState extends State<DashboardPage> {
                             //   child: const Text("Debug", style: TextStyle(color: Colors.white)),
                             // ),
                             const SizedBox(width: 5),
+                            TextButton.icon(
+                              onPressed: () => Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => const CaregiverPage()),
+                              ),
+                              icon: const Icon(Icons.family_restroom, color: Colors.white, size: 18),
+                              label: const Text("Care", style: TextStyle(color: Colors.white)),
+                            ),
                             TextButton(
                               onPressed: () => _logout(context),
                               child: const Text("Logout", style: TextStyle(color: Colors.white)),

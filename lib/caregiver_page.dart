@@ -1,0 +1,488 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+
+import 'caregiver_service.dart';
+import 'time_utils.dart';
+
+const Color _brand = Color(0xFF116FA9);
+
+/// Caregiver Companion Mode.
+/// Tab 1 (patient): invite a caregiver with a code, see/remove linked caregivers.
+/// Tab 2 (caregiver): enter a code, see the patients you monitor.
+class CaregiverPage extends StatefulWidget {
+  const CaregiverPage({super.key});
+
+  @override
+  State<CaregiverPage> createState() => _CaregiverPageState();
+}
+
+class _CaregiverPageState extends State<CaregiverPage> {
+  final CaregiverService _service = CaregiverService();
+  final TextEditingController _codeController = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  String _err(Object e) => e.toString().replaceFirst('Exception: ', '');
+
+  Future<void> _createInvite() async {
+    setState(() => _busy = true);
+    try {
+      final code = await _service.createInviteCode();
+      if (!mounted) return;
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Your invite code'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SelectableText(
+                code,
+                style: const TextStyle(fontSize: 34, fontWeight: FontWeight.bold, letterSpacing: 6, color: _brand),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Give this code to your caregiver. On their phone, they open Care → "Patients I monitor" and enter it.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Done'))],
+        ),
+      );
+    } catch (e) {
+      _snack('Could not create code: ${_err(e)}');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _link() async {
+    FocusScope.of(context).unfocus();
+    setState(() => _busy = true);
+    try {
+      final name = await _service.linkWithCode(_codeController.text);
+      _codeController.clear();
+      _snack('You are now monitoring $name.');
+    } catch (e) {
+      _snack(_err(e));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<bool> _confirm(String title, String body) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF1F5F9),
+        appBar: AppBar(
+          backgroundColor: _brand,
+          foregroundColor: Colors.white,
+          title: const Text('Caregiver Companion'),
+          bottom: const TabBar(
+            labelColor: Colors.white,
+            unselectedLabelColor: Colors.white70,
+            indicatorColor: Colors.white,
+            tabs: [Tab(text: 'My caregivers'), Tab(text: 'Patients I monitor')],
+          ),
+        ),
+        body: Stack(
+          children: [
+            TabBarView(children: [_myCaregiversTab(), _patientsTab()]),
+            if (_busy) const LinearProgressIndicator(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _myCaregiversTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text(
+          'Let a family member or nurse see your doses and get alerts when you miss one.',
+          style: TextStyle(color: Colors.black54),
+        ),
+        const SizedBox(height: 12),
+        ElevatedButton.icon(
+          onPressed: _busy ? null : _createInvite,
+          icon: const Icon(Icons.person_add),
+          label: const Text('Create invite code'),
+          style: ElevatedButton.styleFrom(backgroundColor: _brand, foregroundColor: Colors.white),
+        ),
+        const SizedBox(height: 20),
+        const Text('Linked caregivers', style: TextStyle(fontWeight: FontWeight.bold)),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _service.myCaregivers(),
+          builder: (context, snap) {
+            if (snap.hasError) return _errorText(snap.error);
+            if (!snap.hasData) return const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()));
+            final docs = snap.data!.docs;
+            if (docs.isEmpty) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text('No caregivers yet.', style: TextStyle(color: Colors.grey)),
+              );
+            }
+            return Column(
+              children: docs.map((d) {
+                final data = d.data();
+                return Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.health_and_safety, color: _brand),
+                    title: Text((data['name'] as String?) ?? 'Caregiver'),
+                    subtitle: Text((data['email'] as String?) ?? ''),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.link_off),
+                      onPressed: () async {
+                        if (await _confirm('Remove caregiver?', 'They will stop seeing your doses and alerts.')) {
+                          await _service.removeCaregiver(d.id);
+                        }
+                      },
+                    ),
+                  ),
+                );
+              }).toList(),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _patientsTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text(
+          "Enter the 6-character code from the patient's PillPal app.",
+          style: TextStyle(color: Colors.black54),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _codeController,
+                textCapitalization: TextCapitalization.characters,
+                maxLength: 6,
+                decoration: const InputDecoration(
+                  labelText: 'Invite code',
+                  border: OutlineInputBorder(),
+                  counterText: '',
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: _busy ? null : _link,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _brand,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+              ),
+              child: const Text('Link'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        const Text('Patients', style: TextStyle(fontWeight: FontWeight.bold)),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _service.myPatients(),
+          builder: (context, snap) {
+            if (snap.hasError) return _errorText(snap.error);
+            if (!snap.hasData) return const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()));
+            final docs = snap.data!.docs;
+            if (docs.isEmpty) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text('You are not monitoring anyone yet.', style: TextStyle(color: Colors.grey)),
+              );
+            }
+            return Column(
+              children: docs.map((d) {
+                final name = (d.data()['name'] as String?) ?? 'Patient';
+                return Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.person, color: _brand),
+                    title: Text(name),
+                    subtitle: const Text('Tap to see doses and alerts'),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => PatientMonitorPage(patientUid: d.id, patientName: name)),
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.link_off),
+                      onPressed: () async {
+                        if (await _confirm('Stop monitoring?', 'You will no longer see $name\'s doses.')) {
+                          await _service.unlinkPatient(d.id);
+                        }
+                      },
+                    ),
+                  ),
+                );
+              }).toList(),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+Widget _errorText(Object? e) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Text(
+        'Could not load: $e\nIf this says "permission-denied", publish firestore.rules in the Firebase console.',
+        style: const TextStyle(color: Colors.red),
+      ),
+    );
+
+/// What a caregiver sees for one patient: today's doses, last 7 days, alerts.
+class PatientMonitorPage extends StatelessWidget {
+  final String patientUid;
+  final String patientName;
+
+  const PatientMonitorPage({super.key, required this.patientUid, required this.patientName});
+
+  Future<void> _sendReminder(BuildContext context) async {
+    final controller = TextEditingController(text: 'Please take your medicine.');
+    final message = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Send a reminder to $patientName'),
+        content: TextField(controller: controller, maxLines: 2, decoration: const InputDecoration(border: OutlineInputBorder())),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: _brand, foregroundColor: Colors.white),
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+    if (message == null || message.isEmpty) return;
+    try {
+      await CaregiverService().sendNudge(patientUid, message);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Reminder sent. $patientName will see it when PillPal is open.')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final service = CaregiverService();
+    return Scaffold(
+      backgroundColor: const Color(0xFFF1F5F9),
+      appBar: AppBar(backgroundColor: _brand, foregroundColor: Colors.white, title: Text(patientName)),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _sendReminder(context),
+        backgroundColor: _brand,
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.notifications_active),
+        label: const Text('Send reminder'),
+      ),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: service.schedulesOf(patientUid),
+        builder: (context, schedSnap) {
+          if (schedSnap.hasError) return Padding(padding: const EdgeInsets.all(16), child: _errorText(schedSnap.error));
+          if (!schedSnap.hasData) return const Center(child: CircularProgressIndicator());
+          final schedules = schedSnap.data!.docs.map((d) => d.data()).where((d) => d['isActive'] != false).toList();
+
+          return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: service.logsOf(patientUid),
+            builder: (context, logSnap) {
+              if (logSnap.hasError) return Padding(padding: const EdgeInsets.all(16), child: _errorText(logSnap.error));
+              if (!logSnap.hasData) return const Center(child: CircularProgressIndicator());
+              final logs = {for (final d in logSnap.data!.docs) d.id: d.data()};
+
+              return ListView(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+                children: [
+                  _todayCard(schedules, logs),
+                  _weekCard(logs),
+                  _alertsCard(service),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _todayCard(List<Map<String, dynamic>> schedules, Map<String, Map<String, dynamic>> logs) {
+    final now = DateTime.now();
+    final today = kDaysOfWeek[now.weekday - 1];
+    final intakes = (logs[dateKey(now)]?['intakes'] as List?) ?? [];
+    final rows = <Map<String, dynamic>>[];
+
+    for (final s in schedules) {
+      final days = ((s['repeatDays'] as List?) ?? []).cast<String>();
+      if (!days.contains(today)) continue;
+      for (final t in (s['schedules'] as List? ?? [])) {
+        final tod = TimeOfDay(hour: t['hour'] as int, minute: t['minute'] as int);
+        final timeText = formatTime12h(tod);
+        String status = 'upcoming';
+        for (final i in intakes) {
+          if (i['medicine'] == s['name'] && i['time'] == timeText) status = i['status'] as String;
+        }
+        if (status == 'upcoming' && (tod.hour * 60 + tod.minute) < (now.hour * 60 + now.minute)) {
+          status = 'not_confirmed';
+        }
+        rows.add({'name': s['name'], 'dosage': s['dosage'], 'time': timeText, 'min': tod.hour * 60 + tod.minute, 'status': status});
+      }
+    }
+    rows.sort((a, b) => (a['min'] as int) - (b['min'] as int));
+
+    Widget icon(String status) {
+      switch (status) {
+        case 'on_time':
+          return const Icon(Icons.check_circle, color: Colors.green);
+        case 'missed':
+          return const Icon(Icons.cancel, color: Colors.red);
+        case 'not_confirmed':
+          return const Icon(Icons.hourglass_bottom, color: Colors.orange);
+        default:
+          return const Icon(Icons.schedule, color: Colors.grey);
+      }
+    }
+
+    String label(String status) => const {
+          'on_time': 'Taken',
+          'missed': 'Missed',
+          'not_confirmed': 'Not confirmed yet',
+        }[status] ??
+        'Upcoming';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Today's doses (${DateFormat('MMM d').format(now)})", style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            if (rows.isEmpty) const Text('No doses scheduled today.', style: TextStyle(color: Colors.grey)),
+            ...rows.map((r) => ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: icon(r['status'] as String),
+                  title: Text('${r['name']}  •  ${r['time']}'),
+                  subtitle: Text('${r['dosage'] ?? ''}  —  ${label(r['status'] as String)}'),
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _weekCard(Map<String, Map<String, dynamic>> logs) {
+    int taken = 0;
+    int missed = 0;
+    final now = DateTime.now();
+    for (int i = 0; i < 7; i++) {
+      final intakes = (logs[dateKey(now.subtract(Duration(days: i)))]?['intakes'] as List?) ?? [];
+      taken += intakes.where((x) => x['status'] == 'on_time').length;
+      missed += intakes.where((x) => x['status'] == 'missed').length;
+    }
+    final total = taken + missed;
+    final rate = total == 0 ? null : (taken * 100 / total).round();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Last 7 days', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text(rate == null ? 'No logged doses yet.' : 'Adherence: $rate%',
+                style: TextStyle(fontSize: 22, color: rate == null ? Colors.grey : (rate >= 80 ? Colors.green : Colors.red))),
+            Text('$taken taken  •  $missed missed'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _alertsCard(CaregiverService service) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: service.alertsOf(patientUid),
+          builder: (context, snap) {
+            if (snap.hasError) return _errorText(snap.error);
+            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+            final docs = snap.data!.docs;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Recent alerts', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if (docs.isEmpty) const Text('No alerts. All good!', style: TextStyle(color: Colors.grey)),
+                ...docs.map((d) {
+                  final a = d.data();
+                  final severity = (a['severity'] as String?) ?? 'high';
+                  final ms = a['createdAtMs'] as int?;
+                  final when = ms == null ? '' : DateFormat('MMM d, h:mm a').format(DateTime.fromMillisecondsSinceEpoch(ms));
+                  return ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      severity == 'info' ? Icons.info_outline : Icons.warning_amber_rounded,
+                      color: severity == 'high' ? Colors.red : (severity == 'medium' ? Colors.orange : _brand),
+                    ),
+                    title: Text((a['message'] as String?) ?? ''),
+                    subtitle: Text(when),
+                  );
+                }),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
