@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter build:*)",
+      "Bash(ANDROID_HOME=\"C:/Users/Arjie/AppData/Local/Android/sdk\" flutter build apk --release)"
+    ]
+  }
+}

@@ -1,0 +1,148 @@
+# PillPal — Project Overview
+
+Flutter mobile app: a medicine reminder companion for a physical Bluetooth-connected
+pill dispenser ("PillPalBox"). App display name is "PillPal" (Android label), though
+the package/namespace is still `com.example.myapp4` and an empty legacy native stub
+exists at `app/src/main/java/com/example/medicinetracker/` (earlier working name,
+now unused — safe to delete).
+
+## What it does
+1. User signs up / logs in with email+password (Firebase Auth); profile (name, age,
+   gender, email) is stored in Firestore under `users/{uid}`.
+2. User creates medicine schedules (name, dosage, repeat days, one or more times/day)
+   stored at `users/{uid}/schedules/{scheduleId}`.
+3. User pairs the app with an HC-05 Bluetooth pill dispenser (classic SPP, via
+   `flutter_bluetooth_serial`), then assigns each medicine to a physical slot
+   (A, B, C, ...) on the box. Slot assignments are stored in `users/{uid}.pillbox`
+   (merged map, one entry per slot) and the paired device address is cached locally
+   in `SharedPreferences` (`pillbox_address`).
+4. `flutter_local_notifications` schedules a recurring weekly alarm-clock-style
+   notification per schedule/time (`zonedSchedule`, `matchDateTimeComponents:
+   dayOfWeekAndTime`), full-screen intent + custom sound, so it fires even if the
+   app is closed. The notification payload is JSON encoding which medicine(s)/slot(s)
+   are due.
+5. When the reminder fires (foreground tap, or app launched cold from the
+   notification via `getNotificationAppLaunchDetails` in `main.dart`), the app
+   shows a confirmation dialog and sends a signal string over Bluetooth to the
+   paired box telling it which slot to dispense from.
+6. Dashboard shows today's schedules; a History tab shows Daily and Weekly logs
+   (taken vs. missed) with a simple custom-painted pie chart, backed by
+   `SharedPreferences`-based logging in `NotificationService`
+   (`logMedicationTaken`, `getDailyLogs`, `getWeeklyLogs`, adherence rate).
+
+## Architecture / key files (lib/)
+- `main.dart` — app entrypoint; initializes notifications, Firebase, App Check
+  (debug provider), requests BT/notification permissions, handles cold-start
+  notification → Bluetooth signal flow.
+- `auth_wrapper.dart` — routes to `AuthPage` or `DashboardPage` based on Firebase
+  auth state.
+- `auth_page.dart` / `auth_service.dart` / `signup.dart` — login/signup UI + Firebase
+  Auth calls (`signup.dart` appears to be an older/alternate signup screen not
+  wired into `auth_wrapper.dart`, which uses `auth_page.dart`'s combined
+  login/signup toggle instead — worth checking if `signup.dart` is still used
+  anywhere or is dead code).
+- `dashboard.dart` (~1500 lines, the bulk of the app) — main Scaffold with
+  Dashboard/History tabs, add-medicine dialog, PillPalBox manager dialog
+  (scan/pair/assign slots), schedule polling timer (`_checkSchedules`) that
+  triggers alarms/BT signals, delete-schedule flow, log viewers, `SimplePieChart`.
+- `bluetooth_service.dart` — singleton wrapping `flutter_bluetooth_serial`:
+  connect/reconnect/retry logic, `sendSignal(slot)`, broadcast streams for
+  connection status and incoming data.
+- `notification_service.dart` — singleton wrapping `flutter_local_notifications`:
+  channel setup, permission requests (Android 13+ notif permission, Android 12+
+  exact-alarm via intents), `scheduleWeeklyNotification`, and the
+  SharedPreferences-backed intake-logging/adherence helpers.
+- `firestore_service.dart` — thin Firestore wrapper for schedules and pillbox slot
+  data (currently only partially used — much of this logic is duplicated inline
+  in `dashboard.dart` rather than routed through this service).
+- `debug_bluetooth_page.dart` — standalone screen for testing BT scan/connect/send
+  outside the main flow (the "Debug" nav button that opens it is currently
+  commented out in `dashboard.dart`).
+
+## Stack
+Flutter (Dart), Firebase (Auth, Firestore, App Check — debug providers only, not
+production-hardened), `flutter_bluetooth_serial` (classic SPP, Android-only —
+note this plugin is unmaintained/deprecated upstream), `flutter_local_notifications`
++ `timezone`/`flutter_timezone` for scheduling, `permission_handler` +
+`android_intent_plus` for Android runtime/settings permissions, `shared_preferences`
+for local caching/logging.
+
+## Things a future session should know
+- Firebase config present (`firebase.json`, presumably `google-services.json` under
+  `android/app/`) — App Check is wired for debug only; would need real
+  attestation providers before any release build.
+- No apparent Firestore security rules file in this tree — worth checking the
+  Firebase console/rules before treating this as production-ready.
+- Bluetooth pairing flow assumes a specific hardware companion (HC-05 module on
+  an Arduino-style dispenser) that isn't part of this repo.
+- Stray top-level file named `123` (4 bytes) at repo root — looks like a stray/junk
+  file, not referenced anywhere.
+- Coursework context: this started as an "AppDev" course project pitch (PillPal +
+  Gantt plan) and has since become a real working implementation.
+
+## Suggested improvements (identified from code review, 2026-09)
+
+Reliability / safety (highest priority for a health app):
+- **Fix slot↔medicine matching.** In the PillPalBox manager, each slot's medicine
+  is a free-typed `TextField`, but `_triggerAlarm` in `dashboard.dart` matches it
+  against the schedule's name with exact string equality (`assignment['medicine']
+  == medicineName`). A typo or case mismatch silently means the correct slot never
+  fires. Replace the text field with a dropdown populated from the user's existing
+  schedules so the two can never drift apart.
+- **Dispensing depends on the notification being tapped.** The Bluetooth "dispense"
+  signal is only sent from the in-app foreground timer (`_checkSchedules`) or when
+  the user taps the notification / cold-launches from it (`main.dart`). If the app
+  is backgrounded and the notification is ignored or swiped away, the pill is
+  never physically dispensed even though the reminder fired. Worth moving the
+  due-schedule check into a background task (WorkManager / Android foreground
+  service) so dispensing doesn't depend on a tap.
+- **No dispense acknowledgment.** `sendSignal` only reports whether the Bluetooth
+  write succeeded, not whether the box actually rotated/dropped a pill.
+  `bluetooth_service.dart` already exposes an unused `dataStream` from the
+  device — worth having the Arduino side send a short ack byte back and having
+  the app wait for it before marking the dose as sent.
+- **Missed doses are only logged if the user actively taps "No."** If a reminder
+  is ignored entirely, nothing is ever recorded as missed and no one is alerted.
+  Add an automatic timeout-based "missed" fallback, and consider an optional
+  caregiver/family contact that gets notified after a missed or repeated missed
+  dose (the signup flow already collects age, suggesting an elder-care angle).
+- Add Firestore security rules (`request.auth.uid == uid`) — none found in this
+  tree; without them the database is likely wide open.
+
+Usability:
+- **Edit schedules.** Today you can only Add or (long-press) Delete a schedule —
+  no way to tweak a dosage/time without deleting and re-adding it.
+- **Pill stock / low-supply tracking.** Nothing tracks remaining pill count per
+  slot. Even a simple manual counter (enter starting quantity, decrement per
+  confirmed dose, warn when low) needs no new hardware.
+- **"Snooze" option** on the confirmation dialog, not just Yes/No, for "I'll take
+  it in a bit" instead of forcing an immediate on-time/missed choice.
+
+Smaller cleanup (not features, but adjacent): remove the unused `signup.dart`,
+the empty native stub at `app/src/main/java/com/example/medicinetracker/`, and
+the stray `123` file at the repo root.
+
+## Innovation / differentiator ideas (beyond fixes — for pitches/demos)
+
+- **Scan-to-schedule (OCR).** Camera-scan a prescription label / pill bottle
+  (Google ML Kit text recognition, offline-capable) to auto-extract medicine
+  name, dosage, and frequency and pre-fill the Add Schedule form.
+- **Verified intake via hardware sensing.** Add an IR beam-break or weight
+  sensor per slot on the Arduino side so the box confirms a pill was actually
+  removed and reports it back over the existing Bluetooth link, instead of
+  trusting a manual Yes/No tap. Makes the adherence log reflect reality.
+- **Caregiver companion mode.** A linked second account (family/nurse) that
+  sees live adherence, gets pushed alerts on missed doses, and can remotely
+  trigger an extra reminder — reframes the product from "pillbox app" to
+  "connected-care platform."
+- **Voice-guided reminders + voice confirmation.** TTS announces what's due
+  and which slot; STT accepts a spoken yes/no instead of requiring the user
+  to read and tap — accessibility angle for elderly/low-vision users.
+- **Adherence pattern prediction.** Even a simple rule-based pass over the
+  existing weekly logs (e.g. "missed the 9pm dose 3 of the last 4 Fridays")
+  to proactively suggest re-timing a slot or nudge the caregiver, rather than
+  only reporting misses after the fact.
+- **Missed-dose safety escalation.** Several consecutive unconfirmed doses
+  triggers an in-app "are you okay?" check-in; no response alerts the
+  caregiver contact. Pairs with caregiver mode above for an actual
+  safety-net story, not just a reminder feature.
