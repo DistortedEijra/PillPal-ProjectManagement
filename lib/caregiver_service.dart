@@ -8,6 +8,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'notification_service.dart';
 import 'time_utils.dart';
 
+const String kInviteAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O or 1/I
+
+/// 6-character invite code using only easy-to-read characters.
+String generateInviteCode([Random? rnd]) {
+  final r = rnd ?? Random.secure();
+  return List.generate(6, (_) => kInviteAlphabet[r.nextInt(kInviteAlphabet.length)]).join();
+}
+
 /// Caregiver Companion Mode data layer.
 ///
 /// Firestore layout:
@@ -40,11 +48,9 @@ class CaregiverService {
 
   // ----- patient side -----
   Future<String> createInviteCode() async {
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    final rnd = Random.secure();
     final name = await myName();
     for (int attempt = 0; attempt < 5; attempt++) {
-      final code = List.generate(6, (_) => alphabet[rnd.nextInt(alphabet.length)]).join();
+      final code = generateInviteCode();
       final ref = _db.collection('invites').doc(code);
       final existing = await ref.get();
       if (existing.exists) continue;

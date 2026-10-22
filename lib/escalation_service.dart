@@ -46,6 +46,24 @@ class PendingDose {
       );
 }
 
+/// Side effects of the escalation logic (notifications + Firebase).
+/// Kept in one place so tests can swap them for fakes.
+class EscalationEffects {
+  Future<void> logIntake(String date, String medicine, String time, String status, {bool auto = false}) =>
+      EscalationService.logIntake(date: date, medicine: medicine, time: time, status: status, auto: auto);
+
+  Future<void> alert(String type, String message, {String severity = 'high', String? medicine}) =>
+      EscalationService.addCaregiverAlert(type: type, message: message, severity: severity, medicine: medicine);
+
+  Future<void> cancelNotification(int id) => NotificationService().cancelNotification(id: id);
+
+  Future<void> showNotification(int id, String title, String body, String payload) =>
+      NotificationService().showNotification(id: id, title: title, body: body, payload: payload);
+
+  Future<void> scheduleNotification(int id, String title, String body, DateTime when, String payload) =>
+      NotificationService().scheduleOneTimeNotification(id: id, title: title, body: body, when: when, payload: payload);
+}
+
 class EscalationCheck {
   final List<PendingDose> autoMissed;
   final bool needsCheckIn;
@@ -65,6 +83,9 @@ class EscalationService {
   factory EscalationService() => _instance;
   EscalationService._internal();
 
+  /// Replaceable in tests.
+  EscalationEffects effects = EscalationEffects();
+
   static const Duration followUp1 = Duration(minutes: 10);
   static const Duration followUp2 = Duration(minutes: 20);
   static const Duration missedAfter = Duration(minutes: 30);
@@ -75,7 +96,7 @@ class EscalationService {
   static const String _streakKey = 'escalation_miss_streak';
   static const String _checkInSinceKey = 'escalation_checkin_since';
   static const String _checkInAlertedKey = 'escalation_checkin_alerted';
-  static const int _checkInNotificationId = 424242;
+  static const int checkInNotificationId = 424242;
 
   // ---------- storage ----------
   List<PendingDose> _load(SharedPreferences store) {
@@ -94,12 +115,14 @@ class EscalationService {
     await store.setString(_pendingKey, jsonEncode(list.map((p) => p.toJson()).toList()));
   }
 
-  int _followUpId(PendingDose d, int level) => stableId('${d.key}#$level');
+  static int followUpId(PendingDose d, int level) => stableId('${d.key}#$level');
 
   Future<void> _cancelFollowUps(PendingDose d) async {
-    await NotificationService().cancelNotification(id: _followUpId(d, 1));
-    await NotificationService().cancelNotification(id: _followUpId(d, 2));
+    await effects.cancelNotification(followUpId(d, 1));
+    await effects.cancelNotification(followUpId(d, 2));
   }
+
+  Future<List<PendingDose>> pendingDoses() async => _load(await SharedPreferences.getInstance());
 
   // ---------- shared Firestore writes ----------
   static Future<void> logIntake({
@@ -160,19 +183,19 @@ class EscalationService {
     for (final d in doses) {
       if (pending.any((p) => p.key == d.key)) continue;
       pending.add(d);
-      await NotificationService().scheduleOneTimeNotification(
-        id: _followUpId(d, 1),
-        title: 'Reminder: ${d.medicine} not confirmed',
-        body: "You haven't confirmed ${d.medicine} (${d.time}) yet. Please take it now.",
-        when: d.due.add(followUp1),
-        payload: payload,
+      await effects.scheduleNotification(
+        followUpId(d, 1),
+        'Reminder: ${d.medicine} not confirmed',
+        "You haven't confirmed ${d.medicine} (${d.time}) yet. Please take it now.",
+        d.due.add(followUp1),
+        payload,
       );
-      await NotificationService().scheduleOneTimeNotification(
-        id: _followUpId(d, 2),
-        title: 'Last reminder: ${d.medicine}',
-        body: 'Confirm within 10 minutes or it will be marked as missed and your caregiver will be alerted.',
-        when: d.due.add(followUp2),
-        payload: payload,
+      await effects.scheduleNotification(
+        followUpId(d, 2),
+        'Last reminder: ${d.medicine}',
+        'Confirm within 10 minutes or it will be marked as missed and your caregiver will be alerted.',
+        d.due.add(followUp2),
+        payload,
       );
     }
     await _save(store, pending);
@@ -194,41 +217,41 @@ class EscalationService {
     pending.removeWhere((p) => matches.any((m) => m.key == p.key));
     await _save(store, pending);
 
-    await logIntake(date: date, medicine: medicine, time: time, status: taken ? 'on_time' : 'missed');
+    await effects.logIntake(date, medicine, time, taken ? 'on_time' : 'missed');
 
     if (taken) {
       await _clearCheckIn(store);
       await store.setInt(_streakKey, 0);
     } else {
       await store.setInt(_streakKey, (store.getInt(_streakKey) ?? 0) + 1);
-      await addCaregiverAlert(
-        type: 'skipped',
+      await effects.alert(
+        'skipped',
+        'Skipped $medicine due at $time (tapped "No").',
         severity: 'medium',
         medicine: medicine,
-        message: 'Skipped $medicine due at $time (tapped "No").',
       );
     }
   }
 
   /// Run every minute and on app start. Marks overdue doses as missed,
   /// alerts caregivers, and decides if the "Are you okay?" check-in is needed.
-  Future<EscalationCheck> processOverdue() async {
+  Future<EscalationCheck> processOverdue({DateTime? now}) async {
+    final DateTime t = now ?? DateTime.now();
     final store = await SharedPreferences.getInstance();
-    final now = DateTime.now();
     final pending = _load(store);
-    final overdue = pending.where((p) => now.isAfter(p.due.add(missedAfter))).toList();
+    final overdue = pending.where((p) => t.isAfter(p.due.add(missedAfter))).toList();
     int streak = store.getInt(_streakKey) ?? 0;
 
     for (final p in overdue) {
       await _cancelFollowUps(p);
       streak++;
       try {
-        await logIntake(date: p.date, medicine: p.medicine, time: p.time, status: 'missed', auto: true);
-        await addCaregiverAlert(
-          type: 'missed_dose',
-          medicine: p.medicine,
-          message: 'Missed ${p.medicine}${p.dosage.isNotEmpty ? ' (${p.dosage})' : ''} due at ${p.time}. '
+        await effects.logIntake(p.date, p.medicine, p.time, 'missed', auto: true);
+        await effects.alert(
+          'missed_dose',
+          'Missed ${p.medicine}${p.dosage.isNotEmpty ? ' (${p.dosage})' : ''} due at ${p.time}. '
               'No confirmation after ${missedAfter.inMinutes} minutes.',
+          medicine: p.medicine,
         );
       } catch (_) {}
     }
@@ -243,23 +266,23 @@ class EscalationService {
       needsCheckIn = true;
       final since = store.getInt(_checkInSinceKey);
       if (since == null) {
-        await store.setInt(_checkInSinceKey, now.millisecondsSinceEpoch);
+        await store.setInt(_checkInSinceKey, t.millisecondsSinceEpoch);
         await store.setBool(_checkInAlertedKey, false);
-        await NotificationService().showNotification(
-          id: _checkInNotificationId,
-          title: 'PillPal check-in: are you okay?',
-          body: 'You missed $streak doses in a row. Tap to let us know you are okay.',
-          payload: jsonEncode({'type': 'check_in'}),
+        await effects.showNotification(
+          checkInNotificationId,
+          'PillPal check-in: are you okay?',
+          'You missed $streak doses in a row. Tap to let us know you are okay.',
+          jsonEncode({'type': 'check_in'}),
         );
       } else {
         final alerted = store.getBool(_checkInAlertedKey) ?? false;
-        final waited = now.difference(DateTime.fromMillisecondsSinceEpoch(since));
+        final waited = t.difference(DateTime.fromMillisecondsSinceEpoch(since));
         if (!alerted && waited >= checkInTimeout) {
           await store.setBool(_checkInAlertedKey, true);
           try {
-            await addCaregiverAlert(
-              type: 'no_response',
-              message: 'Missed $streak doses in a row and did not answer the "Are you okay?" '
+            await effects.alert(
+              'no_response',
+              'Missed $streak doses in a row and did not answer the "Are you okay?" '
                   'check-in for ${checkInTimeout.inMinutes} minutes. Please check on them.',
             );
           } catch (_) {}
@@ -282,10 +305,10 @@ class EscalationService {
     await store.setInt(_streakKey, 0);
     if (hadCheckIn) {
       try {
-        await addCaregiverAlert(
-          type: 'check_in_ok',
+        await effects.alert(
+          'check_in_ok',
+          'Answered the check-in: "I\'m okay".',
           severity: 'info',
-          message: 'Answered the check-in: "I\'m okay".',
         );
       } catch (_) {}
     }
@@ -295,15 +318,15 @@ class EscalationService {
     final store = await SharedPreferences.getInstance();
     await _clearCheckIn(store);
     await store.setInt(_streakKey, 0);
-    await addCaregiverAlert(
-      type: 'help_requested',
-      message: 'Asked for help from the PillPal check-in. Please contact them now.',
+    await effects.alert(
+      'help_requested',
+      'Asked for help from the PillPal check-in. Please contact them now.',
     );
   }
 
   Future<void> _clearCheckIn(SharedPreferences store) async {
     await store.remove(_checkInSinceKey);
     await store.remove(_checkInAlertedKey);
-    await NotificationService().cancelNotification(id: _checkInNotificationId);
+    await effects.cancelNotification(checkInNotificationId);
   }
 }
