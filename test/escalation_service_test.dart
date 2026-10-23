@@ -28,6 +28,19 @@ class FakeEffects extends EscalationEffects {
   @override
   Future<void> scheduleNotification(int id, String title, String body, DateTime when, String payload) async =>
       scheduled.add({'id': id, 'title': title, 'when': when});
+
+  final checkInTimeouts = <DateTime>[];
+  int checkInTimeoutCancels = 0;
+
+  @override
+  Future<bool> isLogged(String date, String medicine, String time) async =>
+      logs.any((l) => l['date'] == date && l['medicine'] == medicine && l['time'] == time);
+
+  @override
+  Future<void> scheduleCheckInTimeout(DateTime when) async => checkInTimeouts.add(when);
+
+  @override
+  Future<void> cancelCheckInTimeout() async => checkInTimeoutCancels++;
 }
 
 void main() {
@@ -139,5 +152,58 @@ void main() {
     expect(await svc.missStreak(), 1);
     await svc.resolve(medicine: 'B', date: '2026-10-23', time: '2:00 PM', taken: true);
     expect(await svc.missStreak(), 0);
+  });
+
+  // ---------- background check (runs while the app is closed) ----------
+
+  List<Map<String, String>> meds(List<String> names) =>
+      names.map((n) => {'name': n, 'dosage': '1 tablet'}).toList();
+
+  test('background check: unanswered dose is logged missed + caregiver alert', () async {
+    final missed = await svc.handleDueCheck(
+        date: '2026-10-23', time: '8:00 AM', meds: meds(['Losartan']), now: after(31));
+    expect(missed, ['Losartan']);
+    expect(fx.logs.single['status'], 'missed');
+    expect(fx.logs.single['auto'], isTrue);
+    expect(fx.alerts.single['type'], 'missed_dose');
+    expect(await svc.missStreak(), 1);
+  });
+
+  test('background check: dose already answered (Yes) is left alone', () async {
+    await svc.resolve(medicine: 'Losartan', date: '2026-10-23', time: '8:00 AM', taken: true);
+    final missed = await svc.handleDueCheck(
+        date: '2026-10-23', time: '8:00 AM', meds: meds(['Losartan']), now: after(31));
+    expect(missed, isEmpty);
+    expect(fx.logs.length, 1); // only the "on_time" entry
+    expect(fx.alerts, isEmpty);
+  });
+
+  test('background check and in-app tracker never log the same dose twice', () async {
+    await svc.startTracking([dose('Losartan')], '{}');
+    await svc.handleDueCheck(date: '2026-10-23', time: '8:00 AM', meds: meds(['Losartan']), now: after(31));
+    await svc.processOverdue(now: after(32));
+    expect(fx.logs.where((l) => l['status'] == 'missed').length, 1);
+    expect(await svc.pendingDoses(), isEmpty);
+  });
+
+  test('background check: 2 misses start the check-in and schedule its 15-min timeout', () async {
+    await svc.handleDueCheck(
+        date: '2026-10-23', time: '8:00 AM', meds: meds(['Losartan', 'Metformin']), now: after(31));
+    expect(fx.shown, [EscalationService.checkInNotificationId]);
+    expect(fx.checkInTimeouts.single, after(31).add(const Duration(minutes: 16)));
+
+    await svc.handleCheckInTimeout(now: after(47));
+    expect(fx.alerts.where((a) => a['type'] == 'no_response').length, 1);
+    await svc.handleCheckInTimeout(now: after(60)); // only once
+    expect(fx.alerts.where((a) => a['type'] == 'no_response').length, 1);
+  });
+
+  test('answering the check-in cancels the background timeout', () async {
+    await svc.handleDueCheck(
+        date: '2026-10-23', time: '8:00 AM', meds: meds(['A', 'B']), now: after(31));
+    await svc.confirmOkay();
+    expect(fx.checkInTimeoutCancels, greaterThan(0));
+    await svc.handleCheckInTimeout(now: after(60));
+    expect(fx.alerts.where((a) => a['type'] == 'no_response'), isEmpty);
   });
 }

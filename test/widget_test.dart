@@ -30,6 +30,23 @@ void main() {
     });
   });
 
+  group('weekly time helpers', () {
+    test('parseTime12h reads the History format back', () {
+      expect(parseTime12h('8:00 AM'), const TimeOfDay(hour: 8, minute: 0));
+      expect(parseTime12h('12:05 AM'), const TimeOfDay(hour: 0, minute: 5));
+      expect(parseTime12h('12:00 PM'), const TimeOfDay(hour: 12, minute: 0));
+      expect(parseTime12h('8:30 PM'), const TimeOfDay(hour: 20, minute: 30));
+      expect(parseTime12h('nonsense'), isNull);
+    });
+
+    test('nextWeeklyAt finds the next matching day and time', () {
+      final fri0900 = DateTime(2026, 10, 23, 9, 0); // a Friday
+      expect(nextWeeklyAt(5, 10, 0, from: fri0900), DateTime(2026, 10, 23, 10, 0));
+      expect(nextWeeklyAt(5, 8, 0, from: fri0900), DateTime(2026, 10, 30, 8, 0));
+      expect(nextWeeklyAt(1, 8, 0, from: fri0900), DateTime(2026, 10, 26, 8, 0));
+    });
+  });
+
   group('invite code', () {
     test('is 6 easy-to-read characters', () {
       final rnd = Random(1);

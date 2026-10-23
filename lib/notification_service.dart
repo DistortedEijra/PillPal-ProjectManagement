@@ -195,10 +195,17 @@ class NotificationService {
     required int day, // Monday = 1, ..., Sunday = 7
     required TimeOfDay time,
     String? payload,
+    DateTime? notBefore, // skip occurrences up to this moment (e.g. "already answered today")
   }) async {
     print('DEBUG: Adding reminder for "$title" with time $time.');
     print('DEBUG: scheduleWeeklyNotification() called with id: $id, title: $title, day: $day, time: $time');
-    final tz.TZDateTime scheduledTime = _nextInstanceOfDayAndTime(day, time);
+    tz.TZDateTime scheduledTime = _nextInstanceOfDayAndTime(day, time);
+    if (notBefore != null) {
+      final limit = tz.TZDateTime.from(notBefore, tz.local);
+      while (!scheduledTime.isAfter(limit)) {
+        scheduledTime = scheduledTime.add(const Duration(days: 7));
+      }
+    }
     print('DEBUG: Calculated scheduled time: $scheduledTime');
 
     const details = NotificationDetails(

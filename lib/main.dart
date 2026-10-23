@@ -7,6 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:myapp4/auth_wrapper.dart';
 import 'notification_service.dart';
 import 'bluetooth_service.dart';
+import 'background_tasks.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 // Top-level function for handling background notification taps
@@ -26,6 +27,13 @@ void main() async {
   );
 
   await Firebase.initializeApp();
+
+  // Background alarms (missed-dose check while the app is closed).
+  try {
+    await BackgroundTasks.initialize();
+  } catch (e) {
+    print('Background alarms unavailable: $e');
+  }
 
   await [
     Permission.bluetooth,

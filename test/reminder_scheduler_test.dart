@@ -54,4 +54,29 @@ void main() {
     final b = planWeeklyReminders([med('Losartan', ['Mon'], [eight])], []);
     expect(a.single.id, b.single.id);
   });
+
+  test('each reminder gets follow-ups at +10 and +20 minutes', () {
+    final r = planWeeklyReminders([med('Losartan', ['Mon'], [eight])], []).single;
+    final f = planFollowUps(r);
+    expect(f.map((x) => x.weekday), [1, 1]);
+    expect(f.map((x) => x.time), [const TimeOfDay(hour: 8, minute: 10), const TimeOfDay(hour: 8, minute: 20)]);
+    expect(f.first.payload, r.payload); // opens the same Yes/No confirmation
+    expect(f.map((x) => x.id).toSet().length, 2);
+  });
+
+  test('follow-ups late on Sunday night roll over to Monday', () {
+    final r = planWeeklyReminders([med('Late', ['Sun'], [const TimeOfDay(hour: 23, minute: 55)])], []).single;
+    final f = planFollowUps(r);
+    expect(f.first.weekday, 1);
+    expect(f.first.time, const TimeOfDay(hour: 0, minute: 5));
+  });
+
+  test('background missed-dose check runs 31 minutes after the reminder', () {
+    final r = planWeeklyReminders([med('Losartan', ['Wed'], [twenty])], []).single;
+    final c = planDueCheck(r);
+    expect(c.weekday, 3);
+    expect(c.time, const TimeOfDay(hour: 20, minute: 31));
+    expect(c.params['time'], '8:00 PM');
+    expect((c.params['meds'] as List).single['name'], 'Losartan');
+  });
 }

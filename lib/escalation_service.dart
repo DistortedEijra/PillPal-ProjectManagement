@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'background_tasks.dart';
 import 'notification_service.dart';
 import 'time_utils.dart';
 
@@ -62,6 +63,25 @@ class EscalationEffects {
 
   Future<void> scheduleNotification(int id, String title, String body, DateTime when, String payload) =>
       NotificationService().scheduleOneTimeNotification(id: id, title: title, body: body, when: when, payload: payload);
+
+  /// True if the dose already has a Yes/No/missed entry in the History log.
+  Future<bool> isLogged(String date, String medicine, String time) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return false;
+    final doc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('logs')
+        .doc(date)
+        .get();
+    final intakes = (doc.data()?['intakes'] as List?) ?? const [];
+    return intakes.any((i) => i is Map && i['medicine'] == medicine && i['time'] == time);
+  }
+
+  /// Background alarm that sends the "no answer" caregiver alert even if the app is closed.
+  Future<void> scheduleCheckInTimeout(DateTime when) => BackgroundTasks.scheduleCheckInTimeout(when);
+
+  Future<void> cancelCheckInTimeout() => BackgroundTasks.cancelCheckInTimeout();
 }
 
 class EscalationCheck {
@@ -99,6 +119,14 @@ class EscalationService {
   static const int checkInNotificationId = 424242;
 
   // ---------- storage ----------
+  /// SharedPreferences, re-read from disk so changes made by the background
+  /// task (a separate isolate) are visible here.
+  Future<SharedPreferences> _prefs() async {
+    final store = await SharedPreferences.getInstance();
+    await store.reload();
+    return store;
+  }
+
   List<PendingDose> _load(SharedPreferences store) {
     final raw = store.getString(_pendingKey);
     if (raw == null || raw.isEmpty) return [];
@@ -122,7 +150,7 @@ class EscalationService {
     await effects.cancelNotification(followUpId(d, 2));
   }
 
-  Future<List<PendingDose>> pendingDoses() async => _load(await SharedPreferences.getInstance());
+  Future<List<PendingDose>> pendingDoses() async => _load(await _prefs());
 
   // ---------- shared Firestore writes ----------
   static Future<void> logIntake({
@@ -178,7 +206,7 @@ class EscalationService {
 
   /// Call when a reminder fires. Schedules the follow-up reminders.
   Future<void> startTracking(List<PendingDose> doses, String payload) async {
-    final store = await SharedPreferences.getInstance();
+    final store = await _prefs();
     final pending = _load(store);
     for (final d in doses) {
       if (pending.any((p) => p.key == d.key)) continue;
@@ -208,7 +236,7 @@ class EscalationService {
     required String time,
     required bool taken,
   }) async {
-    final store = await SharedPreferences.getInstance();
+    final store = await _prefs();
     final pending = _load(store);
     final matches = pending.where((p) => p.medicine == medicine && p.date == date && p.time == time).toList();
     for (final m in matches) {
@@ -237,13 +265,16 @@ class EscalationService {
   /// alerts caregivers, and decides if the "Are you okay?" check-in is needed.
   Future<EscalationCheck> processOverdue({DateTime? now}) async {
     final DateTime t = now ?? DateTime.now();
-    final store = await SharedPreferences.getInstance();
+    final store = await _prefs();
     final pending = _load(store);
     final overdue = pending.where((p) => t.isAfter(p.due.add(missedAfter))).toList();
     int streak = store.getInt(_streakKey) ?? 0;
 
     for (final p in overdue) {
       await _cancelFollowUps(p);
+      try {
+        if (await effects.isLogged(p.date, p.medicine, p.time)) continue; // already answered/handled
+      } catch (_) {}
       streak++;
       try {
         await effects.logIntake(p.date, p.medicine, p.time, 'missed', auto: true);
@@ -261,45 +292,113 @@ class EscalationService {
       await store.setInt(_streakKey, streak);
     }
 
-    bool needsCheckIn = false;
-    if (streak >= checkInAfterMisses) {
-      needsCheckIn = true;
-      final since = store.getInt(_checkInSinceKey);
-      if (since == null) {
-        await store.setInt(_checkInSinceKey, t.millisecondsSinceEpoch);
-        await store.setBool(_checkInAlertedKey, false);
-        await effects.showNotification(
-          checkInNotificationId,
-          'PillPal check-in: are you okay?',
-          'You missed $streak doses in a row. Tap to let us know you are okay.',
-          jsonEncode({'type': 'check_in'}),
-        );
-      } else {
-        final alerted = store.getBool(_checkInAlertedKey) ?? false;
-        final waited = t.difference(DateTime.fromMillisecondsSinceEpoch(since));
-        if (!alerted && waited >= checkInTimeout) {
-          await store.setBool(_checkInAlertedKey, true);
-          try {
-            await effects.alert(
-              'no_response',
-              'Missed $streak doses in a row and did not answer the "Are you okay?" '
-                  'check-in for ${checkInTimeout.inMinutes} minutes. Please check on them.',
-            );
-          } catch (_) {}
-        }
-      }
-    }
-
+    final needsCheckIn = await _checkInStep(store, streak, t);
     return EscalationCheck(overdue, needsCheckIn, streak);
   }
 
+  /// Starts the "Are you okay?" check-in after enough misses in a row, and
+  /// alerts the caregiver if it stays unanswered. Returns true while it's open.
+  Future<bool> _checkInStep(SharedPreferences store, int streak, DateTime t) async {
+    if (streak < checkInAfterMisses) return false;
+    final since = store.getInt(_checkInSinceKey);
+    if (since == null) {
+      await store.setInt(_checkInSinceKey, t.millisecondsSinceEpoch);
+      await store.setBool(_checkInAlertedKey, false);
+      await effects.showNotification(
+        checkInNotificationId,
+        'PillPal check-in: are you okay?',
+        'You missed $streak doses in a row. Tap to let us know you are okay.',
+        jsonEncode({'type': 'check_in'}),
+      );
+      try {
+        await effects.scheduleCheckInTimeout(t.add(checkInTimeout + const Duration(minutes: 1)));
+      } catch (_) {}
+    } else {
+      await _checkInTimeoutStep(store, streak, t);
+    }
+    return true;
+  }
+
+  Future<void> _checkInTimeoutStep(SharedPreferences store, int streak, DateTime t) async {
+    final since = store.getInt(_checkInSinceKey);
+    if (since == null) return;
+    final alerted = store.getBool(_checkInAlertedKey) ?? false;
+    final waited = t.difference(DateTime.fromMillisecondsSinceEpoch(since));
+    if (!alerted && waited >= checkInTimeout) {
+      await store.setBool(_checkInAlertedKey, true);
+      try {
+        await effects.alert(
+          'no_response',
+          'Missed $streak doses in a row and did not answer the "Are you okay?" '
+              'check-in for ${checkInTimeout.inMinutes} minutes. Please check on them.',
+        );
+      } catch (_) {}
+    }
+  }
+
+  /// Runs from the background alarm ~30 min after a reminder, even when the
+  /// app is closed. Any medicine in [meds] without a History entry for
+  /// [date]/[time] is logged as missed and the caregiver is alerted.
+  /// Returns the names that were marked missed.
+  Future<List<String>> handleDueCheck({
+    required String date,
+    required String time,
+    required List<Map<String, String>> meds,
+    DateTime? now,
+  }) async {
+    final DateTime t = now ?? DateTime.now();
+    final store = await _prefs();
+    int streak = store.getInt(_streakKey) ?? 0;
+    final missed = <String>[];
+
+    for (final m in meds) {
+      final name = m['name'] ?? '';
+      if (name.isEmpty) continue;
+      bool logged;
+      try {
+        logged = await effects.isLogged(date, name, time);
+      } catch (_) {
+        logged = true; // can't check (offline): don't raise a false alarm
+      }
+      if (logged) continue;
+      final dosage = m['dosage'] ?? '';
+      try {
+        await effects.logIntake(date, name, time, 'missed', auto: true);
+        await effects.alert(
+          'missed_dose',
+          'Missed $name${dosage.isNotEmpty ? ' ($dosage)' : ''} due at $time. '
+              'No confirmation after ${missedAfter.inMinutes} minutes.',
+          medicine: name,
+        );
+      } catch (_) {}
+      streak++;
+      missed.add(name);
+    }
+
+    // The in-app tracker doesn't need to handle these doses anymore.
+    final pending = _load(store);
+    final before = pending.length;
+    pending.removeWhere((p) => p.date == date && p.time == time && meds.any((m) => m['name'] == p.medicine));
+    if (pending.length != before) await _save(store, pending);
+
+    if (missed.isNotEmpty) await store.setInt(_streakKey, streak);
+    await _checkInStep(store, streak, t);
+    return missed;
+  }
+
+  /// Runs from the background alarm 15 min after the check-in was shown.
+  Future<void> handleCheckInTimeout({DateTime? now}) async {
+    final store = await _prefs();
+    await _checkInTimeoutStep(store, store.getInt(_streakKey) ?? 0, now ?? DateTime.now());
+  }
+
   Future<int> missStreak() async {
-    final store = await SharedPreferences.getInstance();
+    final store = await _prefs();
     return store.getInt(_streakKey) ?? 0;
   }
 
   Future<void> confirmOkay() async {
-    final store = await SharedPreferences.getInstance();
+    final store = await _prefs();
     final hadCheckIn = store.getInt(_checkInSinceKey) != null;
     await _clearCheckIn(store);
     await store.setInt(_streakKey, 0);
@@ -315,7 +414,7 @@ class EscalationService {
   }
 
   Future<void> requestHelp() async {
-    final store = await SharedPreferences.getInstance();
+    final store = await _prefs();
     await _clearCheckIn(store);
     await store.setInt(_streakKey, 0);
     await effects.alert(
@@ -328,5 +427,8 @@ class EscalationService {
     await store.remove(_checkInSinceKey);
     await store.remove(_checkInAlertedKey);
     await effects.cancelNotification(checkInNotificationId);
+    try {
+      await effects.cancelCheckInTimeout();
+    } catch (_) {}
   }
 }

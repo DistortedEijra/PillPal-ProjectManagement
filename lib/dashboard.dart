@@ -282,7 +282,9 @@ class _DashboardPageState extends State<DashboardPage> {
       );
     }
 
-    // Start the missed-dose escalation timer for each due medicine.
+    // Start the in-app missed-dose tracking only if the background alarms
+    // couldn't be set (they handle follow-ups and the 30-minute check).
+    if (_remindersScheduled) return;
     final due = DateTime(now.year, now.month, now.day, now.hour, now.minute);
     try {
       await EscalationService().startTracking(
@@ -343,6 +345,7 @@ class _DashboardPageState extends State<DashboardPage> {
                     taken: false,
                   );
                 }
+                ReminderScheduler.skipFollowUpsFor(date: date, time: time);
               },
             ),
             TextButton(
@@ -357,6 +360,7 @@ class _DashboardPageState extends State<DashboardPage> {
                     taken: true,
                   );
                 }
+                ReminderScheduler.skipFollowUpsFor(date: date, time: time);
               },
             ),
           ],
@@ -411,6 +415,7 @@ class _DashboardPageState extends State<DashboardPage> {
   /// If a reminder fired while the app was closed and the dose isn't logged
   /// yet, start the missed-dose escalation for it now (doses from the last 30 min).
   Future<void> _catchUpRecentDoses() async {
+    if (_remindersScheduled) return; // background alarms already cover this
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     final now = DateTime.now();
