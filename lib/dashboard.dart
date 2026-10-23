@@ -818,9 +818,26 @@ class _DashboardPageState extends State<DashboardPage> {
         ? List.from(pillBoxAssignments.map((e) => Map<String, String>.from(e)))
         : [{'slot': 'A', 'medicine': ''}];
 
-    List<TextEditingController> _controllers = tempAssignedSlots.map((slot) {
-      return TextEditingController(text: slot['medicine']);
-    }).toList();
+    // Slot choices come only from the medicines in the user's schedules,
+    // so a slot can never be assigned a name that doesn't match a schedule.
+    final List<String> medicineOptions = <String>[];
+    for (final m in medicines) {
+      final name = (m['name'] ?? '').toString().trim();
+      if (name.isNotEmpty &&
+          !medicineOptions.any((o) => o.toLowerCase() == name.toLowerCase())) {
+        medicineOptions.add(name);
+      }
+    }
+    String? matchOption(String? typed) {
+      final t = (typed ?? '').trim().toLowerCase();
+      if (t.isEmpty) return null;
+      for (final o in medicineOptions) {
+        if (o.toLowerCase() == t) return o;
+      }
+      return null; // old free-typed name with no matching schedule
+    }
+    List<String?> selectedMedicines =
+        tempAssignedSlots.map((slot) => matchOption(slot['medicine'])).toList();
 
     showDialog(
       context: context,
@@ -1115,7 +1132,23 @@ class _DashboardPageState extends State<DashboardPage> {
                     const SizedBox(height: 8),
                     Text('Slots Remaining ($remainingSlots)'),
                     const SizedBox(height: 8),
+                    if (medicineOptions.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8.0),
+                        child: Text(
+                          'Add a medicine schedule first, then assign it to a slot.',
+                          style: TextStyle(color: Colors.black54),
+                        ),
+                      ),
                     ...List.generate(tempAssignedSlots.length, (index) {
+                      // Hide medicines already picked in another slot.
+                      final taken = <String>{
+                        for (int j = 0; j < selectedMedicines.length; j++)
+                          if (j != index && selectedMedicines[j] != null) selectedMedicines[j]!,
+                      };
+                      final choices = medicineOptions
+                          .where((o) => !taken.contains(o) || o == selectedMedicines[index])
+                          .toList();
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 8.0),
                         child: Row(
@@ -1123,19 +1156,39 @@ class _DashboardPageState extends State<DashboardPage> {
                             Text('Slot ${tempAssignedSlots[index]['slot']}'),
                             const SizedBox(width: 16),
                             Expanded(
-                              child: TextField(
-                                controller: _controllers[index],
-                                decoration: InputDecoration(
-                                  hintText: 'Enter medicine name...',
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                    borderSide: BorderSide.none,
-                                  ),
-                                  filled: true,
-                                  fillColor: Colors.black87,
-                                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
+                                decoration: BoxDecoration(
+                                  color: Colors.black87,
+                                  borderRadius: BorderRadius.circular(8),
                                 ),
-                                style: const TextStyle(color: Colors.white),
+                                child: DropdownButtonHideUnderline(
+                                  child: DropdownButton<String>(
+                                    value: selectedMedicines[index],
+                                    isExpanded: true,
+                                    dropdownColor: Colors.black87,
+                                    iconEnabledColor: Colors.white,
+                                    iconDisabledColor: Colors.white38,
+                                    style: const TextStyle(color: Colors.white),
+                                    hint: const Text('Choose medicine',
+                                        style: TextStyle(color: Colors.white54)),
+                                    disabledHint: const Text('No medicines yet',
+                                        style: TextStyle(color: Colors.white38)),
+                                    items: choices
+                                        .map((name) => DropdownMenuItem<String>(
+                                              value: name,
+                                              child: Text(name, overflow: TextOverflow.ellipsis),
+                                            ))
+                                        .toList(),
+                                    onChanged: choices.isEmpty
+                                        ? null
+                                        : (value) {
+                                            setStateDialog(() {
+                                              selectedMedicines[index] = value;
+                                            });
+                                          },
+                                  ),
+                                ),
                               ),
                             ),
                             IconButton(
@@ -1145,7 +1198,7 @@ class _DashboardPageState extends State<DashboardPage> {
                                   setStateDialog(() {
                                     if (tempAssignedSlots.length > 1) {
                                       tempAssignedSlots.removeAt(index);
-                                      _controllers.removeAt(index);
+                                      selectedMedicines.removeAt(index);
                                     }
                                   });
                                 }
@@ -1163,11 +1216,12 @@ class _DashboardPageState extends State<DashboardPage> {
                           if (tempAssignedSlots.length < 6) {
                             if(mounted) {
                               setStateDialog(() {
-                                tempAssignedSlots.add({
-                                  'slot': String.fromCharCode(65 + tempAssignedSlots.length),
-                                  'medicine': '',
-                                });
-                                _controllers.add(TextEditingController());
+                                // Use the first free letter (A-F), even after a slot was removed.
+                                final used = tempAssignedSlots.map((s) => s['slot']).toSet();
+                                final next = List.generate(6, (i) => String.fromCharCode(65 + i))
+                                    .firstWhere((l) => !used.contains(l));
+                                tempAssignedSlots.add({'slot': next, 'medicine': ''});
+                                selectedMedicines.add(null);
                               });
                             }
                           }
@@ -1191,7 +1245,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 ElevatedButton(
                   onPressed: () async {
                     for (int i = 0; i < tempAssignedSlots.length; i++) {
-                      tempAssignedSlots[i]['medicine'] = _controllers[i].text;
+                      tempAssignedSlots[i]['medicine'] = selectedMedicines[i] ?? '';
                     }
 
                     final updatedAssignments = tempAssignedSlots

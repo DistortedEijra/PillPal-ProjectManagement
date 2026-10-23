@@ -91,7 +91,7 @@ for local caching/logging.
 ## Suggested improvements (identified from code review, 2026-09)
 
 Reliability / safety (highest priority for a health app):
-- **Fix slot↔medicine matching.** In the PillPalBox manager, each slot's medicine
+- ~~**Fix slot↔medicine matching.**~~ DONE 2026-10-23: Assign Medicine is now a dropdown of the user's active schedule names (no duplicates across slots; old typed names that match case-insensitively are kept). Original note: In the PillPalBox manager, each slot's medicine
   is a free-typed `TextField`, but `_triggerAlarm` in `dashboard.dart` matches it
   against the schedule's name with exact string equality (`assignment['medicine']
   == medicineName`). A typo or case mismatch silently means the correct slot never
