@@ -46,7 +46,7 @@ If nothing ever arrives, your HC-05 may be set to 38400 baud. Change `hc05.begin
 1. In PillPal, tap the **PillPalBox button** (bottom left), then tap **⋯**.
 2. If asked, allow **Nearby devices**.
 3. Tap **Scan for Devices**, then tap **HC-05**. The **D7 LED turns on** (connected).
-4. Under **Assign Medicine**, type each medicine name **exactly as it appears in your schedule**, in its slot (A, B, …). Then tap **Save**.
+4. Under **Assign Medicine**, pick each slot's medicine from the dropdown (it lists the medicines in your schedules). Then tap **Save**.
 
 ## 5. Test
 
@@ -59,5 +59,5 @@ Other commands, for testing from a Bluetooth terminal app: `a`–`f` turns a slo
 - **HC-05 isn't in the list:** pair it in the phone's Bluetooth settings first, then scan again.
 - **D7 LED never turns on:** check STATE → D4 and the 10kΩ pull-down. Some HC-05 boards leave the STATE pin unconnected; on those, the sketch never sees a connection.
 - **Connected, but the slot LED doesn't light:** check that TXD → D2 and RXD ← D3 aren't swapped. Also check the baud rate (9600 vs 38400).
-- **Wrong LED, or no LED for a medicine:** the slot name has to match the schedule name.
+- **Wrong LED, or no LED for a medicine:** check which slot that medicine is assigned to in Assign Medicine.
 - **LED only lights with the app open:** this is expected. When the app is closed, tap the reminder notification to send the signal.
