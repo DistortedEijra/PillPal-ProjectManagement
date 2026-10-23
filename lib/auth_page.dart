@@ -40,33 +40,40 @@ class _AuthPageState extends State<AuthPage> {
     });
 
     String? result;
-    if (_authMode == AuthMode.Login) {
-      result = await _authService.signIn(
-        email: emailController.text.trim(),
-        password: passwordController.text.trim(),
-      );
-    } else {
-      if (passwordController.text != confirmPasswordController.text) {
-        result = "Passwords do not match.";
-      } else if (nameController.text.isEmpty ||
-          ageController.text.isEmpty ||
-          _selectedGender == null ||
-          emailController.text.isEmpty) {
-        result = "Please fill all fields.";
-      } else {
-        result = await _authService.signUp(
+    try {
+      if (_authMode == AuthMode.Login) {
+        result = await _authService.signIn(
           email: emailController.text.trim(),
           password: passwordController.text.trim(),
-          name: nameController.text.trim(),
-          age: ageController.text.trim(),
-          gender: _selectedGender!,
         );
+      } else {
+        if (passwordController.text != confirmPasswordController.text) {
+          result = "Passwords do not match.";
+        } else if (nameController.text.isEmpty ||
+            ageController.text.isEmpty ||
+            _selectedGender == null ||
+            emailController.text.isEmpty) {
+          result = "Please fill all fields.";
+        } else {
+          result = await _authService.signUp(
+            email: emailController.text.trim(),
+            password: passwordController.text.trim(),
+            name: nameController.text.trim(),
+            age: ageController.text.trim(),
+            gender: _selectedGender!,
+          );
+        }
+      }
+    } catch (e) {
+      result = 'Something went wrong: $e';
+    } finally {
+      // Always stop the spinner, even if something unexpected failed.
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
       }
     }
-
-    setState(() {
-      _isLoading = false;
-    });
 
     if (result != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
