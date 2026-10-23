@@ -19,6 +19,7 @@ import 'escalation_service.dart';
 import 'caregiver_service.dart';
 import 'caregiver_page.dart';
 import 'time_utils.dart';
+import 'reminder_scheduler.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -43,6 +44,7 @@ class _DashboardPageState extends State<DashboardPage> {
   late StreamSubscription<String?> _notificationTapSubscription;
   final CareListeners _careListeners = CareListeners();
   bool _checkInDialogOpen = false;
+  bool _remindersScheduled = false; // true once real Android alarms are set
 
   @override
   void initState() {
@@ -269,12 +271,16 @@ class _DashboardPageState extends State<DashboardPage> {
     // Use a unique ID for the notification, e.g., from timestamp
     final int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
-    NotificationService().showNotification(
-      id: notificationId,
-      title: 'Medicine Reminder',
-      body: notificationBody,
-      payload: payload,
-    );
+    // The scheduled Android alarm already shows this reminder; only show one
+    // here if scheduling failed, so the user never gets it twice.
+    if (!_remindersScheduled) {
+      NotificationService().showNotification(
+        id: notificationId,
+        title: 'Medicine Reminder',
+        body: notificationBody,
+        payload: payload,
+      );
+    }
 
     // Start the missed-dose escalation timer for each due medicine.
     final due = DateTime(now.year, now.month, now.day, now.hour, now.minute);
@@ -385,6 +391,72 @@ class _DashboardPageState extends State<DashboardPage> {
       } catch (_) {}
       await _fetchSchedules(user.uid);
       await _fetchPillBoxAssignments(user.uid);
+      await _syncReminders();
+      await _catchUpRecentDoses();
+    }
+  }
+
+  // ---------- Reminders that work when the app is closed ----------
+  Future<void> _syncReminders() async {
+    try {
+      final count = await ReminderScheduler.sync(allMedicines, pillBoxAssignments);
+      _remindersScheduled = count > 0;
+      log('Scheduled $count weekly reminder alarm(s)');
+    } catch (e) {
+      _remindersScheduled = false;
+      log('Could not schedule reminders: $e');
+    }
+  }
+
+  /// If a reminder fired while the app was closed and the dose isn't logged
+  /// yet, start the missed-dose escalation for it now (doses from the last 30 min).
+  Future<void> _catchUpRecentDoses() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final now = DateTime.now();
+    final today = daysOfWeek[now.weekday - 1];
+    final dateStr = dateKey(now);
+    try {
+      final logDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('logs')
+          .doc(dateStr)
+          .get();
+      final intakes = (logDoc.data()?['intakes'] as List?) ?? [];
+      final doses = <PendingDose>[];
+      final payloadMeds = <Map<String, String>>[];
+      String? payloadTime;
+      for (final med in medicines) {
+        if (!(med['repeatDays'] as List).contains(today)) continue;
+        for (final t in (med['schedules'] as List).cast<TimeOfDay>()) {
+          final due = DateTime(now.year, now.month, now.day, t.hour, t.minute);
+          if (due.isAfter(now) || !due.isAfter(now.subtract(EscalationService.missedAfter))) continue;
+          final timeStr = formatTime(t);
+          final logged = intakes.any((i) => i['medicine'] == med['name'] && i['time'] == timeStr);
+          if (logged) continue;
+          final assignment = pillBoxAssignments.firstWhere(
+            (a) => a['medicine'] == med['name'],
+            orElse: () => <String, String>{},
+          );
+          final slot = (assignment['slot'] ?? '').toUpperCase();
+          doses.add(PendingDose(
+            medicine: med['name'] as String,
+            dosage: (med['dosage'] ?? '') as String,
+            slot: slot,
+            date: dateStr,
+            time: timeStr,
+            due: due,
+          ));
+          payloadMeds.add({'name': med['name'] as String, 'dosage': (med['dosage'] ?? '') as String, 'slot': slot});
+          payloadTime = timeStr;
+        }
+      }
+      if (doses.isEmpty) return;
+      final payload = jsonEncode({'medicines': payloadMeds, 'date': dateStr, 'time': payloadTime});
+      await EscalationService().startTracking(doses, payload);
+    } catch (e) {
+      log('Catch-up check failed: $e');
     }
   }
 
@@ -468,6 +540,7 @@ class _DashboardPageState extends State<DashboardPage> {
               child: const Text('Logout'),
               onPressed: () async {
                 Navigator.of(dialogContext).pop(); // Close dialog
+                await ReminderScheduler.cancelAll(); // stop this user's alarms
                 await FirebaseAuth.instance.signOut();
               },
             ),
@@ -711,6 +784,7 @@ class _DashboardPageState extends State<DashboardPage> {
                           medicines = allMedicines.where((m) => m['isActive'] == true).toList();
                         });
                       }
+                      _syncReminders();
                       nav.pop();
                     } catch (e) {
                       if (mounted) {
@@ -1134,6 +1208,7 @@ class _DashboardPageState extends State<DashboardPage> {
                             .set({
                           'pillbox_assignments': updatedAssignments,
                         }, SetOptions(merge: true));
+                        _syncReminders();
                         nav.pop();
                       } catch (e) {
                         if (mounted) {
@@ -1205,7 +1280,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       medicines = allMedicines.where((m) => m['isActive'] == true).toList();
                     });
                   }
-                  
+                  _syncReminders();
                   
                   // 3. Close the dialog
                   Navigator.of(context).pop();

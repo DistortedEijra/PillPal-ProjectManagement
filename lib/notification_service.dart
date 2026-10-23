@@ -201,33 +201,50 @@ class NotificationService {
     final tz.TZDateTime scheduledTime = _nextInstanceOfDayAndTime(day, time);
     print('DEBUG: Calculated scheduled time: $scheduledTime');
 
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      id,
-      title,
-      body,
-      scheduledTime,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
-          importance: Importance.max,
-          priority: Priority.high,
-          icon: '@drawable/icon',
-          playSound: true,
-          sound: RawResourceAndroidNotificationSound('fahh_effect'),
-          fullScreenIntent: true,
-          enableLights: true,
-          groupKey: 'medicine_group',
-        ),
-        iOS: DarwinNotificationDetails(
-          presentSound: true,
-        ),
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _channelId,
+        _channelName,
+        channelDescription: _channelDescription,
+        importance: Importance.max,
+        priority: Priority.high,
+        icon: '@drawable/icon',
+        playSound: true,
+        sound: RawResourceAndroidNotificationSound('fahh_effect'),
+        fullScreenIntent: true,
+        enableLights: true,
+        groupKey: 'medicine_group',
       ),
-      payload: payload,
-      androidScheduleMode: AndroidScheduleMode.alarmClock,
-      matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+      iOS: DarwinNotificationDetails(
+        presentSound: true,
+      ),
     );
+
+    try {
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduledTime,
+        details,
+        payload: payload,
+        androidScheduleMode: AndroidScheduleMode.alarmClock,
+        matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+      );
+    } catch (e) {
+      // Exact alarms not allowed on this phone: fall back to an inexact alarm.
+      print('DEBUG: exact weekly alarm failed ($e), using inexact');
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduledTime,
+        details,
+        payload: payload,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+      );
+    }
     print('DEBUG: Notification has been scheduled.');
   }
 
