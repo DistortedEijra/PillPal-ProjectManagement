@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import 'caregiver_service.dart';
+import 'reminder_chat_page.dart';
 import 'time_utils.dart';
 
 const Color _brand = Color(0xFF116FA9);
@@ -160,11 +161,32 @@ class _CaregiverPageState extends State<CaregiverPage> {
             return Column(
               children: docs.map((d) {
                 final data = d.data();
+                final caregiverName = (data['name'] as String?) ?? 'Caregiver';
                 return Card(
                   child: ListTile(
                     leading: const Icon(Icons.health_and_safety, color: _brand),
-                    title: Text((data['name'] as String?) ?? 'Caregiver'),
-                    subtitle: Text((data['email'] as String?) ?? ''),
+                    title: Text(caregiverName),
+                    subtitle: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                      stream: _service.reminderChat(_service.myUid, d.id),
+                      builder: (context, chat) {
+                        final pending = chat.data?.docs.where((m) => m.data()['done'] != true).length ?? 0;
+                        if (pending == 0) return const Text('Tap to open reminders');
+                        return Text(
+                          '$pending reminder${pending == 1 ? '' : 's'} waiting for Done',
+                          style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
+                        );
+                      },
+                    ),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ReminderChatPage(
+                          patientUid: _service.myUid,
+                          caregiverUid: d.id,
+                          title: 'Reminders from $caregiverName',
+                          isCaregiver: false,
+                        ),
+                      ),
+                    ),
                     trailing: IconButton(
                       icon: const Icon(Icons.link_off),
                       onPressed: () async {
@@ -277,36 +299,17 @@ class PatientMonitorPage extends StatelessWidget {
 
   const PatientMonitorPage({super.key, required this.patientUid, required this.patientName});
 
-  Future<void> _sendReminder(BuildContext context) async {
-    final controller = TextEditingController(text: 'Please take your medicine.');
-    final message = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Send a reminder to $patientName'),
-        content: TextField(controller: controller, maxLines: 2, decoration: const InputDecoration(border: OutlineInputBorder())),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            style: ElevatedButton.styleFrom(backgroundColor: _brand, foregroundColor: Colors.white),
-            child: const Text('Send'),
-          ),
-        ],
+  void _openChat(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ReminderChatPage(
+          patientUid: patientUid,
+          caregiverUid: CaregiverService().myUid,
+          title: 'Reminders to $patientName',
+          isCaregiver: true,
+        ),
       ),
     );
-    if (message == null || message.isEmpty) return;
-    try {
-      await CaregiverService().sendNudge(patientUid, message);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Reminder sent. $patientName will see it when PillPal is open.')),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send: $e')));
-      }
-    }
   }
 
   @override
@@ -316,11 +319,11 @@ class PatientMonitorPage extends StatelessWidget {
       backgroundColor: const Color(0xFFF1F5F9),
       appBar: AppBar(backgroundColor: _brand, foregroundColor: Colors.white, title: Text(patientName)),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _sendReminder(context),
+        onPressed: () => _openChat(context),
         backgroundColor: _brand,
         foregroundColor: Colors.white,
-        icon: const Icon(Icons.notifications_active),
-        label: const Text('Send reminder'),
+        icon: const Icon(Icons.chat),
+        label: const Text('Reminders chat'),
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: service.schedulesOf(patientUid),

@@ -24,6 +24,8 @@ String generateInviteCode([Random? rnd]) {
 ///   users/{caregiver}/patients/{patient}   -> {name}
 ///   users/{patient}/alerts/{id}            -> written by EscalationService
 ///   users/{patient}/nudges/{id}            -> reminders sent by a caregiver
+///       {fromUid, fromName, message, createdAtMs, handled, done, doneAtMs}
+///       shown as a chat per patient+caregiver; the patient taps Done.
 class CaregiverService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
@@ -34,6 +36,8 @@ class CaregiverService {
   }
 
   DocumentReference<Map<String, dynamic>> _user(String uid) => _db.collection('users').doc(uid);
+
+  String get myUid => _uid;
 
   Future<String> myName() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -128,10 +132,36 @@ class CaregiverService {
       'fromUid': _uid,
       'fromName': await myName(),
       'message': message,
-      'handled': false,
+      'handled': false, // local notification shown on the patient's phone
+      'done': false, // patient tapped Done in the chat
       'createdAt': FieldValue.serverTimestamp(),
+      'createdAtMs': DateTime.now().millisecondsSinceEpoch,
     });
   }
+
+  // ----- reminder chat (both sides) -----
+
+  /// All reminders one caregiver sent to one patient (sorted in the UI, so
+  /// no composite Firestore index is needed).
+  Stream<QuerySnapshot<Map<String, dynamic>>> reminderChat(String patientUid, String caregiverUid) =>
+      _user(patientUid).collection('nudges').where('fromUid', isEqualTo: caregiverUid).snapshots();
+
+  /// Patient side: mark a reminder as done.
+  Future<void> markReminderDone(String nudgeId) => _user(_uid).collection('nudges').doc(nudgeId).update({
+        'done': true,
+        'handled': true,
+        'doneAt': FieldValue.serverTimestamp(),
+        'doneAtMs': DateTime.now().millisecondsSinceEpoch,
+      });
+}
+
+/// Sort time of a reminder (older docs only have the server timestamp).
+int reminderTimeMs(Map<String, dynamic> d) {
+  final ms = d['createdAtMs'];
+  if (ms is int) return ms;
+  final ts = d['createdAt'];
+  if (ts is Timestamp) return ts.millisecondsSinceEpoch;
+  return DateTime.now().millisecondsSinceEpoch; // just sent, not synced yet
 }
 
 /// Runs inside the app while it is open:
@@ -159,7 +189,7 @@ class CareListeners {
         await NotificationService().showNotification(
           id: stableId('nudge_${doc.id}'),
           title: 'Reminder from ${d['fromName'] ?? 'your caregiver'}',
-          body: (d['message'] as String?) ?? 'Please take your medicine.',
+          body: '${(d['message'] as String?) ?? 'Please take your medicine.'} (Open Care to tap Done)',
         );
         await doc.reference.update({'handled': true});
       }

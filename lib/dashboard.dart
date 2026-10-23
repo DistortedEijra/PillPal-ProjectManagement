@@ -508,18 +508,18 @@ class _DashboardPageState extends State<DashboardPage> {
     try {
       final doc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
       final docData = doc.data();
-      if (doc.exists && docData != null && docData.containsKey('pillbox_assignments')) {
-        final assignments = (docData['pillbox_assignments'] as List<dynamic>)
-            .map((item) => Map<String, String>.from(item as Map))
-            .toList();
-        if (mounted) {
-          setState(() {
-            pillBoxAssignments = assignments;
-          });
-        }
+      // Always replace (empty if this account has no slots yet), so nothing
+      // from a previously logged-in account is left behind.
+      final assignments = (docData?['pillbox_assignments'] as List<dynamic>? ?? [])
+          .map((item) => Map<String, String>.from(item as Map))
+          .toList();
+      if (mounted) {
+        setState(() {
+          pillBoxAssignments = assignments;
+        });
       }
     } catch (e) {
-      // Handle error
+      if (mounted) setState(() => pillBoxAssignments = []);
     }
   }
 
@@ -546,6 +546,7 @@ class _DashboardPageState extends State<DashboardPage> {
               onPressed: () async {
                 Navigator.of(dialogContext).pop(); // Close dialog
                 await ReminderScheduler.cancelAll(); // stop this user's alarms
+                await EscalationService().resetForLogout(); // forget this user's pending doses
                 await FirebaseAuth.instance.signOut();
               },
             ),
@@ -1174,19 +1175,23 @@ class _DashboardPageState extends State<DashboardPage> {
                                         style: TextStyle(color: Colors.white54)),
                                     disabledHint: const Text('No medicines yet',
                                         style: TextStyle(color: Colors.white38)),
-                                    items: choices
-                                        .map((name) => DropdownMenuItem<String>(
-                                              value: name,
-                                              child: Text(name, overflow: TextOverflow.ellipsis),
-                                            ))
-                                        .toList(),
-                                    onChanged: choices.isEmpty
-                                        ? null
-                                        : (value) {
-                                            setStateDialog(() {
-                                              selectedMedicines[index] = value;
-                                            });
-                                          },
+                                    items: [
+                                      // "Empty" = no medicine in this slot.
+                                      const DropdownMenuItem<String>(
+                                        value: null,
+                                        child: Text('Empty',
+                                            style: TextStyle(color: Colors.white54, fontStyle: FontStyle.italic)),
+                                      ),
+                                      ...choices.map((name) => DropdownMenuItem<String>(
+                                            value: name,
+                                            child: Text(name, overflow: TextOverflow.ellipsis),
+                                          )),
+                                    ],
+                                    onChanged: (value) {
+                                      setStateDialog(() {
+                                        selectedMedicines[index] = value;
+                                      });
+                                    },
                                   ),
                                 ),
                               ),
@@ -1248,9 +1253,12 @@ class _DashboardPageState extends State<DashboardPage> {
                       tempAssignedSlots[i]['medicine'] = selectedMedicines[i] ?? '';
                     }
 
+                    // Keep empty slots too, so the box layout (A, B, C...) is
+                    // remembered; an empty slot never matches a schedule.
                     final updatedAssignments = tempAssignedSlots
-                        .where((slot) => slot['medicine']?.trim().isNotEmpty == true)
-                        .toList();
+                        .map((slot) => Map<String, String>.from(slot))
+                        .toList()
+                      ..sort((a, b) => (a['slot'] ?? '').compareTo(b['slot'] ?? ''));
                     if (mounted) {
                       setState(() {
                         pillBoxAssignments = updatedAssignments;

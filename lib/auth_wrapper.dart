@@ -18,7 +18,9 @@ class AuthWrapper extends StatelessWidget {
         // User is logged in
         if (snapshot.connectionState == ConnectionState.active) {
           if (snapshot.hasData) {
-            return const DashboardPage();
+            // Keyed by account, so switching accounts never reuses the
+            // previous account's medicines or PillPalBox slots.
+            return DashboardPage(key: ValueKey(snapshot.data!.uid));
           }
           // User is not logged in
           return const AuthPage();

@@ -423,6 +423,20 @@ class EscalationService {
     );
   }
 
+  /// Called on logout: drop this device's pending doses, miss streak and
+  /// check-in so they don't carry over to the next account.
+  Future<void> resetForLogout() async {
+    try {
+      final store = await _prefs();
+      for (final d in _load(store)) {
+        await _cancelFollowUps(d);
+      }
+      await store.remove(_pendingKey);
+      await store.remove(_streakKey);
+      await _clearCheckIn(store);
+    } catch (_) {}
+  }
+
   Future<void> _clearCheckIn(SharedPreferences store) async {
     await store.remove(_checkInSinceKey);
     await store.remove(_checkInAlertedKey);
