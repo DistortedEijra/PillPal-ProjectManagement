@@ -37,6 +37,10 @@ class _DashboardPageState extends State<DashboardPage> {
   String? pairedDeviceName;
   String? givenName; // Firestore-stored user given name
   Timer? _scheduleTimer;
+  // Minutes ("2026-10-24 8:0") whose dose was already sent to the box, so the
+  // 5-second check fires each dose only once.
+  final Set<String> _firedMinutes = {};
+  int _timerTicks = 0;
   late StreamSubscription<bool> _connectionSubscription;
   late StreamSubscription<String> _dataSubscription;
   bool isPillBoxConnected = false;
@@ -102,15 +106,17 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   void _startScheduleTimer() {
-    // Check every minute
-    _scheduleTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
-      if (mounted) {
-        _checkSchedules();
-      }
+    // Check every 5 seconds so the box lights up within a few seconds of the
+    // scheduled time (a 1-minute timer could be up to 59 s late, or skip a
+    // minute). The missed-dose escalation check still runs about once a minute.
+    _scheduleTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (!mounted) return;
+      _timerTicks++;
+      _checkSchedules(runEscalation: _timerTicks % 12 == 0);
     });
   }
 
-  void _checkSchedules() {
+  void _checkSchedules({bool runEscalation = true}) {
     final now = DateTime.now();
     final String currentDay = daysOfWeek[now.weekday - 1];
     final TimeOfDay currentTime = TimeOfDay.fromDateTime(now);
@@ -130,11 +136,12 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
 
-    if (dueMedicines.isNotEmpty) {
+    final minuteKey = '${dateKey(now)} ${now.hour}:${now.minute}';
+    if (dueMedicines.isNotEmpty && _firedMinutes.add(minuteKey)) {
       _triggerAlarm(dueMedicines, now);
     }
 
-    _runEscalationCheck();
+    if (runEscalation) _runEscalationCheck();
   }
 
   // ---------- Missed-Dose Safety Escalation ----------
