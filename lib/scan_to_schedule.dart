@@ -118,6 +118,8 @@ Rules:
       ),
     );
 
+    final watch = Stopwatch()..start();
+    debugPrint('[AI scan] sending ${(bytes.length / 1024).round()} KB photo to ${OcrConfig.model}');
     try {
       final response = await model.generateContent([
         Content.multi([
@@ -125,9 +127,25 @@ Rules:
           InlineDataPart(_mimeType(picked), bytes),
         ]),
       ]).timeout(OcrConfig.timeout);
+      debugPrint('[AI scan] answered in ${watch.elapsed.inSeconds} s');
       return _resultsFromJson(response.text ?? '');
     } on TimeoutException {
-      throw const ScanException('The AI took too long. Check your internet and try again.');
+      debugPrint('[AI scan] no answer after ${watch.elapsed.inSeconds} s, testing connection');
+      // Find out WHY: send a tiny text-only message.
+      final test = await _connectionTest();
+      if (test == null) {
+        throw ScanException(
+            'No answer from Gemini in ${OcrConfig.timeout.inSeconds} s, and a short test message '
+            'also got no answer, so this device cannot reach Gemini. '
+            'On the emulator: Device Manager > ⋮ > Cold Boot Now, or test on a real phone. '
+            'Also check the internet connection.');
+      }
+      if (test.startsWith('error:')) {
+        throw ScanException('Gemini test failed: ${test.substring(6)}');
+      }
+      throw ScanException(
+          'Gemini is reachable (test answered in $test s) but reading this photo took over '
+          '${OcrConfig.timeout.inSeconds} s. Try again with a closer photo of just the medicines.');
     } on SocketException {
       throw const ScanException(_noInternet);
     } on http.ClientException {
@@ -162,6 +180,32 @@ Rules:
   }
 
   static const String _noInternet = 'No internet connection. Handwritten scan needs internet.';
+
+  /// Sends "Reply with OK" (no photo). Returns the seconds it took, null if
+  /// there was no answer in 20 s, or "error:<message>" if it failed.
+  static Future<String?> _connectionTest() async {
+    final watch = Stopwatch()..start();
+    try {
+      final model = FirebaseAI.googleAI().generativeModel(
+        model: OcrConfig.model,
+        generationConfig: GenerationConfig(
+          maxOutputTokens: 20,
+          thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.minimal),
+        ),
+      );
+      await model
+          .generateContent([Content.text('Reply with OK')])
+          .timeout(const Duration(seconds: 20));
+      debugPrint('[AI scan] test answered in ${watch.elapsed.inSeconds} s');
+      return '${watch.elapsed.inSeconds}';
+    } on TimeoutException {
+      debugPrint('[AI scan] test got no answer in 20 s');
+      return null;
+    } catch (e) {
+      debugPrint('[AI scan] test failed: $e');
+      return 'error:$e';
+    }
+  }
 
   static String _mimeType(XFile f) {
     final fromPicker = f.mimeType;
