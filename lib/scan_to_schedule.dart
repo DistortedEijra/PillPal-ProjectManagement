@@ -88,8 +88,8 @@ Rules:
   /// Returns one result per medicine found (at least one), or null if the user
   /// cancelled the photo.
   static Future<List<ScanResult>?> scanWithAi(ImageSource source) async {
-    // 1600 px is enough to read handwriting and uploads faster than 2000 px.
-    final XFile? picked = await _pick(source, maxWidth: 1600, quality: 85);
+    // 1280 px is enough to read handwriting and keeps the request small.
+    final XFile? picked = await _pick(source, maxWidth: 1280, quality: 80);
     if (picked == null) return null;
     final bytes = await picked.readAsBytes();
 
@@ -116,9 +116,6 @@ Rules:
         // No answer. Find out why with a tiny text-only message, then try the
         // backup model once before giving up.
         final test = await _connectionTest(OcrConfig.model);
-        if (test != null && test.startsWith('error:')) {
-          throw ScanException('Gemini test failed: ${test.substring(6)}');
-        }
         final backup = OcrConfig.fallbackModel;
         if (backup.isEmpty || backup == OcrConfig.model) {
           throw ScanException(_timeoutMessage(test));
@@ -126,8 +123,7 @@ Rules:
         try {
           text = await _readPhoto(backup, bytes, mime, OcrConfig.fallbackTimeout);
         } on TimeoutException {
-          final test2 = await _connectionTest(backup);
-          throw ScanException(_timeoutMessage(test ?? test2));
+          throw ScanException(_timeoutMessage(test ?? await _connectionTest(backup)));
         }
       }
       return _resultsFromJson(text);
@@ -199,6 +195,10 @@ Rules:
   }
 
   static String _timeoutMessage(String? testSeconds) {
+    if (testSeconds != null && testSeconds.startsWith('error:')) {
+      return 'Gemini did not answer the photo, and a short test message failed: '
+          '${testSeconds.substring(6)}';
+    }
     if (testSeconds == null) {
       return 'Gemini did not answer, and a short test message also got no answer, so this '
           'phone cannot reach Gemini right now. Check the internet (try switching between '
@@ -215,10 +215,8 @@ Rules:
     try {
       final model = FirebaseAI.googleAI().generativeModel(
         model: modelName,
-        generationConfig: GenerationConfig(
-          maxOutputTokens: 20,
-          thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.minimal),
-        ),
+        // Default settings: not every model accepts every thinking level.
+        generationConfig: GenerationConfig(maxOutputTokens: 50),
       );
       await model
           .generateContent([Content.text('Reply with OK')])
