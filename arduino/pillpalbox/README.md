@@ -1,7 +1,9 @@
 # PillPalBox: HC-05 setup
 
 Arduino Uno + HC-05 Bluetooth module + 6 slot LEDs (A–F) + 1 "connected" LED. No speaker.
-When a dose is due, the PillPal app sends one capital letter (`A`–`F`). The matching LED blinks for 1 minute.
+Optional: DS3231 clock module (recommended, see below).
+
+**Sketch v3: the box remembers the reminders.** Each time PillPal connects (and whenever you change a schedule or a slot), the app sends the box the current time and the list of reminders. The box saves the list (it survives power-off) and blinks the slot by itself at the right time for 5 minutes, **even if the phone is not connected**. When the phone is connected, the app also sends `A`–`F` at the due time like before (1-minute blink).
 
 ## 1. Wiring
 
@@ -27,14 +29,43 @@ The HC-05 RXD pin runs at 3.3V, so the divider protects it.
 | Slot F | D8 | 220Ω to GND |
 | Connected | D7 | 220Ω to GND |
 
+### Optional: DS3231 clock module (recommended)
+
+Without it, the box keeps time with the Arduino's own timer. That timer **drifts a few minutes a day** and **forgets the time when the power is cut** (for example when the power bank switches off). The saved reminders stay, but they wait until the phone connects once to set the time again.
+
+A DS3231 module (with its coin battery) keeps the exact time, even unplugged.
+
+| DS3231 | Arduino Uno |
+|---|---|
+| VCC | 5V |
+| GND | GND |
+| SDA | A4 |
+| SCL | A5 |
+
+Then in Arduino IDE: **Sketch → Include Library → Manage Libraries →** search **RTClib** (by Adafruit) → Install (accept its dependencies). In `pillpalbox.ino` change `#define USE_DS3231 0` to `#define USE_DS3231 1`, and upload.
+
 ## 2. Upload the sketch
 
 1. Open `pillpalbox.ino` in Arduino IDE.
 2. Tools → Board → **Arduino Uno**, then Tools → Port → your Uno's COM port.
 3. Upload. The HC-05 can stay wired because it uses D2/D3, not 0/1.
-4. Serial Monitor (9600 baud) shows `READY PillPalBox v2`. A fast-blinking LED on the HC-05 means it's waiting to pair.
+4. Serial Monitor (9600 baud) shows `READY PillPalBox v3, N reminders saved`. A fast-blinking LED on the HC-05 means it's waiting to pair.
 
 If nothing ever arrives, your HC-05 may be set to 38400 baud. Change `hc05.begin(9600)` to `hc05.begin(38400)`.
+
+### Test the saved reminders without the phone
+
+Serial Monitor (9600 baud, "Newline" line ending), type these one by one:
+
+```
+#T,2026,10,25,20,40,0
+#C
+#S,A,127,20,41
+#E
+#Q
+```
+
+That sets the clock to 8:40 PM, saves one reminder (slot A, every day, 8:41 PM) and prints it. About a minute later LED A blinks and the monitor shows `REMINDER A`. (`127` = every day; Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64, add them up.) Type `?` any time to see the clock and how many reminders are saved.
 
 ## 3. Pair the phone
 
@@ -60,4 +91,6 @@ Other commands, for testing from a Bluetooth terminal app: `a`–`f` turns a slo
 - **D7 LED never turns on:** check STATE → D4 and the 10kΩ pull-down. Some HC-05 boards leave the STATE pin unconnected; on those, the sketch never sees a connection.
 - **Connected, but the slot LED doesn't light:** check that TXD → D2 and RXD ← D3 aren't swapped. Also check the baud rate (9600 vs 38400).
 - **Wrong LED, or no LED for a medicine:** check which slot that medicine is assigned to in Assign Medicine.
-- **LED only lights with the app open:** this is expected. When the app is closed, tap the reminder notification to send the signal.
+- **Box doesn't light by itself:** open PillPal once near the box so it connects (that sends the time and the list). Type `?` in the Serial Monitor: it should show `CLOCK ...` (not "not set") and `SCHED` more than 0. After a power cut without a DS3231, the clock needs the phone again.
+- **Box lights a few minutes early/late:** the Arduino timer drifts; connect the phone to re-sync, or add a DS3231.
+- **Only medicines with a slot** are saved in the box (max 40 reminder times).

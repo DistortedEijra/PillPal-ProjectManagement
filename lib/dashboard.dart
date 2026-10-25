@@ -22,6 +22,7 @@ import 'caregiver_page.dart';
 import 'time_utils.dart';
 import 'reminder_scheduler.dart';
 import 'medicine_editor.dart';
+import 'pillbox_sync.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -54,6 +55,10 @@ class _DashboardPageState extends State<DashboardPage> {
   // Live updates of the schedules, so edits made by a caregiver show up here
   // and the reminders are re-scheduled.
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _schedulesSub;
+  // Only send the reminder list to the PillPalBox once both were loaded, so a
+  // failed load never wipes the reminders saved in the box.
+  bool _schedulesLoaded = false;
+  bool _slotsLoaded = false;
 
   @override
   void initState() {
@@ -76,6 +81,8 @@ class _DashboardPageState extends State<DashboardPage> {
           isPillBoxConnected = isConnected;
         });
       }
+      // Each time the box connects: set its clock and send the reminder list.
+      if (isConnected) _syncPillBox();
     });
 
     _dataSubscription = BluetoothService().dataStream.listen((data) {
@@ -423,6 +430,14 @@ class _DashboardPageState extends State<DashboardPage> {
       _remindersScheduled = false;
       log('Could not schedule reminders: $e');
     }
+    // Also give the PillPalBox its own copy, so it lights up even when the
+    // phone is not connected. (Skipped if the box is not connected right now.)
+    _syncPillBox();
+  }
+
+  void _syncPillBox() {
+    if (!_schedulesLoaded || !_slotsLoaded) return;
+    unawaited(PillBoxSync.sync(allMedicines, pillBoxAssignments));
   }
 
   /// If a reminder fired while the app was closed and the dose isn't logged
@@ -507,6 +522,7 @@ class _DashboardPageState extends State<DashboardPage> {
           .get();
 
       final fetchedMedicines = snapshot.docs.map(_medicineFromDoc).toList();
+      _schedulesLoaded = true;
 
       if (mounted) {
         setState(() {
@@ -557,6 +573,7 @@ class _DashboardPageState extends State<DashboardPage> {
       }
 
       final updated = snap.docs.map(_medicineFromDoc).toList();
+      _schedulesLoaded = true;
       if (!mounted) return;
       setState(() {
         allMedicines = updated;
@@ -645,6 +662,7 @@ class _DashboardPageState extends State<DashboardPage> {
       final assignments = (docData?['pillbox_assignments'] as List<dynamic>? ?? [])
           .map((item) => Map<String, String>.from(item as Map))
           .toList();
+      _slotsLoaded = true;
       if (mounted) {
         setState(() {
           pillBoxAssignments = assignments;
