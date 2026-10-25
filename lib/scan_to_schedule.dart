@@ -389,6 +389,12 @@ class ScanResult {
   final List<String> days;
   final bool foundFrequency;
 
+  /// True when the days came from the label ("daily", "Mon, Wed, Fri", "weekly"...).
+  final bool foundDays;
+
+  /// Extra hint for the user, e.g. "Take for 7 days." or "As needed".
+  final String? note;
+
   const ScanResult({
     required this.rawText,
     required this.name,
@@ -396,6 +402,8 @@ class ScanResult {
     required this.times,
     required this.days,
     required this.foundFrequency,
+    this.foundDays = false,
+    this.note,
   });
 
   bool get isEmpty => name == null && dosage == null && !foundFrequency;
@@ -408,12 +416,14 @@ class ScanResult {
     if (name != null) found.add('name');
     if (dosage != null) found.add('dosage');
     if (foundFrequency) found.add('${times.length} time(s) a day');
+    if (foundDays && days.length < 7) found.add('days (${days.join(', ')})');
     final missing = <String>[];
     if (name == null) missing.add('name');
     if (dosage == null) missing.add('dosage');
     if (!foundFrequency) missing.add('schedule (set to 8:00 AM)');
     var s = 'Found: ${found.join(', ')}.';
     if (missing.isNotEmpty) s += ' Not found: ${missing.join(', ')}.';
+    if (note != null) s += ' $note';
     return '$s Please check everything before saving.';
   }
 }
@@ -421,15 +431,83 @@ class ScanResult {
 /// Rule-based parser for common prescription wording
 /// (e.g. "Amoxicillin 500mg", "Take 1 capsule 3x a day", "BID", "every 8 hours").
 class PrescriptionParser {
-  static final RegExp _strength =
-      RegExp(r'(\d+(?:\.\d+)?)\s?(mg|mcg|µg|g|ml|iu|units?)\b', caseSensitive: false);
-  static final RegExp _amount = RegExp(
-      r'\b(\d+(?:\.\d+)?|1/2|one|two|three|half)\s*(tablets?|tabs?|capsules?|caps?|pills?|puffs?|drops?|teaspoons?|tsp|sachets?)\b',
+  /// Strength: "500 mg", "15mg/5ml", "100 IU", "1%".
+  static final RegExp _strength = RegExp(
+      r'(\d+(?:\.\d+)?)\s?(mg|mcg|µg|ug|g|iu|units?|%)(?:\s?/\s?(\d+(?:\.\d+)?)?\s?(ml|tab|cap)s?)?(?![a-z])',
       caseSensitive: false);
-  static final RegExp _clock =
-      RegExp(r'\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm|a\.m\.|p\.m\.)(?![a-z])', caseSensitive: false);
-  static final RegExp _everyHours =
-      RegExp(r'(?:every\s+(\d{1,2})\s*(?:hours?|hrs?|h)\b|\bq\s?(\d{1,2})\s?h\b)', caseSensitive: false);
+
+  /// Amount per dose: "1 tab", "1/2 tablet", "½ tab", "1 1/2 caps", "5 ml",
+  /// "2 puffs", "10 drops", "isang tableta".
+  static final RegExp _amount = RegExp(
+      r'(?<![\w/.])(\d+\s+1/2|\d+(?:\.\d+)?|\d/\d|½|¼|one|two|three|four|half|isang|dalawang|kalahating)'
+      r'\s*-?\s*(tablets?|tabs?|tableta|capsules?|caps?|kapsula|pills?|puffs?|drops?|gtts?|teaspoons?|tsps?|'
+      r'tablespoons?|tbsps?|mls?|cc|sachets?|ampules?|ampoules?|patch(?:es)?|sprays?|suppositor(?:y|ies)|vials?|lozenges?)'
+      r'(?![a-z])',
+      caseSensitive: false);
+
+  /// "8am", "8 a.m.", "8:30 PM", "8.30pm".
+  static final RegExp _clock12 =
+      RegExp(r'(?<![\d:.])(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s*([ap])\.?\s?m\b\.?', caseSensitive: false);
+
+  /// 24-hour "20:00", "08:00", "9:00" (only when no AM/PM follows).
+  static final RegExp _clock24 = RegExp(
+      r'(?<![\d:/.])([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?!\s*[ap]\.?\s?m\b)',
+      caseSensitive: false);
+
+  /// "1-0-1" style (morning-noon-night).
+  static final RegExp _mnn = RegExp(r'(?<![\d\-/.])([0-2])\s?-\s?([0-2])\s?-\s?([0-2])(?![\d\-/])');
+
+  static final RegExp _everyHours = RegExp(
+      r'(?:every\s+(\d{1,2})\s*(?:hours?|hrs?|h)\b|\bq\.?\s?(\d{1,2})\s?(?:h|hrs?|hours?)\b|tuwing\s+(\d{1,2})\s+oras)',
+      caseSensitive: false);
+
+  /// "once a week", "2x a week", "twice weekly", "weekly", "isang beses sa isang linggo".
+  static final RegExp _perWeek = RegExp(
+      r'\b(once|twice|thrice|one|two|three|\d)\s*(?:x|times?)?\s*(?:a|per|every|each|/)\s*(?:week|wk)\b'
+      r'|\b(once|twice|thrice)\s+weekly\b|\bweekly\b|\bevery\s+week\b|\bq\.?\s?wk\b'
+      r'|(?:isang beses|minsan) sa isang linggo',
+      caseSensitive: false);
+
+  static final RegExp _everyOtherDay = RegExp(
+      r'every\s+other\s+day|alternate\s+days?|every\s+(?:2|two)\s+days|every\s+second\s+day|\bq\.?o\.?d\b|tuwing\s+ikalawang\s+araw',
+      caseSensitive: false);
+
+  static final RegExp _duration = RegExp(
+      r'(?:\bfor\s+|\bx\s*|×\s*|sa\s+loob\s+ng\s+)(\d{1,3})\s*(days?|weeks?|months?|araw|linggo)\b',
+      caseSensitive: false);
+
+  static final RegExp _asNeeded =
+      RegExp(r'\bprn\b|as needed|when needed|if needed|kung kailangan', caseSensitive: false);
+
+  /// Words for a time of day, with the time they stand for.
+  static final List<(RegExp, TimeOfDay)> _timeWords = [
+    (RegExp(r'\b(morning|breakfast|umaga|almusal|q\.?am)\b', caseSensitive: false),
+        const TimeOfDay(hour: 8, minute: 0)),
+    (RegExp(r'\b(noon|lunch|midday|tanghali|tanghalian)\b', caseSensitive: false),
+        const TimeOfDay(hour: 12, minute: 0)),
+    (RegExp(r'\b(afternoon|hapon|merienda)\b', caseSensitive: false), const TimeOfDay(hour: 15, minute: 0)),
+    (RegExp(r'\b(evening|dinner|supper|hapunan|q\.?pm)\b', caseSensitive: false),
+        const TimeOfDay(hour: 19, minute: 0)),
+    (RegExp(r'\b(night|bedtime|h\.?s|q\.?h\.?s|before sleep|bago matulog|gabi)\b', caseSensitive: false),
+        const TimeOfDay(hour: 21, minute: 0)),
+  ];
+
+  static const Map<String, String> _dayWords = {
+    'monday': 'Mon', 'mon': 'Mon', 'lunes': 'Mon',
+    'tuesday': 'Tue', 'tues': 'Tue', 'tue': 'Tue', 'martes': 'Tue',
+    'wednesday': 'Wed', 'wed': 'Wed', 'miyerkules': 'Wed', 'miyerkoles': 'Wed',
+    'thursday': 'Thu', 'thurs': 'Thu', 'thur': 'Thu', 'thu': 'Thu', 'huwebes': 'Thu',
+    'friday': 'Fri', 'fri': 'Fri', 'biyernes': 'Fri',
+    'saturday': 'Sat', 'sat': 'Sat', 'sabado': 'Sat',
+    'sunday': 'Sun', 'sun': 'Sun',
+  };
+
+  static final String _dayAlt = (_dayWords.keys.toList()..sort((a, b) => b.length - a.length)).join('|');
+  static final RegExp _dayName = RegExp('\\b($_dayAlt|(?:tuwing|every)\\s+linggo)s?\\.?(?![a-z])', caseSensitive: false);
+  static final RegExp _dayRange = RegExp(
+      '\\b($_dayAlt)s?\\.?\\s*(?:-|–|to|thru|through|until|hanggang)\\s*($_dayAlt)s?\\b',
+      caseSensitive: false);
+  static final RegExp _dayCodes = RegExp(r'\b(m\s?w\s?f|t\s?th\s?s|t\s?th|m\s?-\s?f)\b', caseSensitive: false);
 
   static const Set<String> _skipFirstWords = {
     'rx', 'take', 'patient', 'name', 'dr', 'doctor', 'md', 'date', 'pharmacy', 'refill',
@@ -485,6 +563,8 @@ class PrescriptionParser {
         times: r.times,
         days: r.days,
         foundFrequency: r.foundFrequency,
+        foundDays: r.foundDays,
+        note: r.note,
       ));
     }
     return results;
@@ -496,22 +576,47 @@ class PrescriptionParser {
         .map((l) => l.trim())
         .where((l) => l.isNotEmpty)
         .toList();
-    final lower = raw.toLowerCase();
+    // Lines with the prescription date or the doctor's clinic hours would add
+    // wrong days/times, so the schedule is read from the other lines.
+    final scheduleText = lines
+        .where((l) => !RegExp(r'^(date|petsa|clinic|tel|phone|address|lic|ptr|s2)\b', caseSensitive: false)
+            .hasMatch(l))
+        .join('\n');
+    final lower = scheduleText.toLowerCase();
 
+    final weekly = _weeklyCount(lower);
     var times = _findTimes(lower);
-    final foundFrequency = times.isNotEmpty;
+    final foundFrequency = times.isNotEmpty || weekly != null;
     if (times.isEmpty) times = [const TimeOfDay(hour: 8, minute: 0)];
 
-    final weekly = RegExp(r'\b(once a week|weekly|every week)\b').hasMatch(lower);
+    final days = _findDays(lower, weekly);
+
+    final notes = <String>[];
+    if (days.everyOtherDay) {
+      notes.add('"Every other day" was set to Mon, Wed, Fri, Sun. Change it if needed.');
+    }
+    final dur = _duration.firstMatch(lower);
+    if (dur != null) notes.add('Take for ${dur.group(1)} ${_durationUnit(dur.group(2)!, dur.group(1)!)}.');
+    if (_asNeeded.hasMatch(lower)) notes.add('Marked "as needed" on the label.');
 
     return ScanResult(
       rawText: raw,
       name: findKnownMedicine(raw) ?? _findName(lines),
       dosage: _findDosage(raw),
       times: times,
-      days: weekly ? ['Mon'] : List.of(kDaysOfWeek),
+      days: days.days,
       foundFrequency: foundFrequency,
+      foundDays: days.found,
+      note: notes.isEmpty ? null : notes.join(' '),
     );
+  }
+
+  static String _durationUnit(String unit, String n) {
+    final u = unit.toLowerCase();
+    final one = n == '1';
+    if (u.startsWith('day') || u == 'araw') return one ? 'day' : 'days';
+    if (u.startsWith('week') || u == 'linggo') return one ? 'week' : 'weeks';
+    return one ? 'month' : 'months';
   }
 
   /// Common generic medicines. Used to fix small OCR misspellings
@@ -631,26 +736,146 @@ class PrescriptionParser {
         .join(' ');
   }
 
+  // ---------------- dosage ----------------
+
   static String? _findDosage(String raw) {
+    final strength = _strength.firstMatch(raw);
+
     RegExpMatch? amount;
     for (final m in _amount.allMatches(raw)) {
+      // "5ml" inside "15mg/5ml" is part of the strength, not the dose.
+      if (strength != null && m.start < strength.end && m.end > strength.start) continue;
+      final value = _qtyValue(m.group(1)!);
+      if (value == null || value <= 0) continue;
       final start = m.start;
-      final before = raw.substring(start >= 8 ? start - 8 : 0, start).toLowerCase();
-      if (before.contains('take')) {
+      final before = raw.substring(start >= 14 ? start - 14 : 0, start).toLowerCase();
+      // Skip "Qty: 30 tablets", "#60 tabs", "Dispense 21 caps".
+      if (RegExp(r'(qty|quantity|#|disp|no\.|total)[^\n]*$').hasMatch(before)) continue;
+      final isTake = RegExp(r'(take|sig|inumin|uminom|give|use|apply|inhale|instill|chew|dissolve)\W*$')
+          .hasMatch(before);
+      final unit = _unitName(m.group(2)!, 1);
+      final liquid = unit == 'ml' || unit == 'tsp' || unit == 'tbsp' || unit == 'drop';
+      if (!isTake && value > (liquid ? 30 : 4)) continue;
+      if (isTake) {
         amount = m;
         break;
       }
-      final n = double.tryParse(m.group(1)!);
-      if (amount == null && (n == null || n <= 4)) amount = m; // skip "30 tablets" quantities
+      amount ??= m;
     }
-    final strength = _strength.firstMatch(raw);
 
-    final amountText = amount == null ? null : '${amount.group(1)} ${amount.group(2)}'.toLowerCase();
-    final strengthText = strength == null ? null : '${strength.group(1)} ${strength.group(2)!.toLowerCase()}';
+    String? amountText;
+    if (amount != null) {
+      final value = _qtyValue(amount.group(1)!)!;
+      amountText = '${_qtyText(amount.group(1)!)} ${_unitName(amount.group(2)!, value)}';
+    }
+    final strengthText = strength == null ? null : _strengthText(strength);
 
     if (amountText != null && strengthText != null) return '$amountText ($strengthText)';
     return amountText ?? strengthText;
   }
+
+  static String _strengthText(RegExpMatch m) {
+    String unit(String u) {
+      final l = u.toLowerCase();
+      if (l == 'iu') return 'IU';
+      if (l == 'ug' || l == 'µg') return 'mcg';
+      if (l == 'unit') return 'units';
+      return l;
+    }
+
+    var text = m.group(2) == '%' ? '${m.group(1)}%' : '${m.group(1)} ${unit(m.group(2)!)}';
+    if (m.group(4) != null) {
+      final per = m.group(3);
+      text += per == null ? '/${m.group(4)!.toLowerCase()}' : '/$per ${m.group(4)!.toLowerCase()}';
+    }
+    return text;
+  }
+
+  static const Map<String, double> _qtyWords = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'half': 0.5, 'isang': 1, 'dalawang': 2,
+    'kalahating': 0.5, '½': 0.5, '¼': 0.25,
+  };
+
+  static double? _qtyValue(String q) {
+    final t = q.trim().toLowerCase();
+    if (_qtyWords.containsKey(t)) return _qtyWords[t];
+    final mixed = RegExp(r'^(\d+)\s+1/2$').firstMatch(t);
+    if (mixed != null) return int.parse(mixed.group(1)!) + 0.5;
+    final frac = RegExp(r'^(\d)/(\d)$').firstMatch(t);
+    if (frac != null) {
+      final d = int.parse(frac.group(2)!);
+      return d == 0 ? null : int.parse(frac.group(1)!) / d;
+    }
+    return double.tryParse(t);
+  }
+
+  static String _qtyText(String q) {
+    final t = q.trim().toLowerCase();
+    switch (t) {
+      case 'half':
+      case 'kalahating':
+      case '½':
+        return '1/2';
+      case '¼':
+        return '1/4';
+      case 'one':
+      case 'isang':
+        return '1';
+      case 'two':
+      case 'dalawang':
+        return '2';
+      case 'three':
+        return '3';
+      case 'four':
+        return '4';
+    }
+    return t.replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  /// "tabs" -> "tablet(s)", "gtt" -> "drop(s)", "cc" -> "ml".
+  static String _unitName(String raw, double value) {
+    final u = raw.toLowerCase();
+    String base;
+    if (u.startsWith('tab') && !u.startsWith('tablesp')) {
+      base = 'tablet';
+    } else if (u.startsWith('cap') || u == 'kapsula') {
+      base = 'capsule';
+    } else if (u.startsWith('pill')) {
+      base = 'pill';
+    } else if (u.startsWith('puff')) {
+      base = 'puff';
+    } else if (u.startsWith('drop') || u.startsWith('gtt')) {
+      base = 'drop';
+    } else if (u.startsWith('teasp') || u.startsWith('tsp')) {
+      base = 'tsp';
+    } else if (u.startsWith('tablesp') || u.startsWith('tbsp')) {
+      base = 'tbsp';
+    } else if (u.startsWith('ml') || u == 'cc') {
+      base = 'ml';
+    } else if (u.startsWith('sachet')) {
+      base = 'sachet';
+    } else if (u.startsWith('amp')) {
+      base = 'ampule';
+    } else if (u.startsWith('patch')) {
+      base = 'patch';
+    } else if (u.startsWith('spray')) {
+      base = 'spray';
+    } else if (u.startsWith('suppositor')) {
+      base = 'suppository';
+    } else if (u.startsWith('vial')) {
+      base = 'vial';
+    } else if (u.startsWith('lozenge')) {
+      base = 'lozenge';
+    } else {
+      base = u;
+    }
+    if (value <= 1 || base == 'ml' || base == 'tsp' || base == 'tbsp') return base;
+    if (base == 'patch') return 'patches';
+    if (base == 'suppository') return 'suppositories';
+    return '${base}s';
+  }
+
+  // ---------------- times ----------------
 
   static List<TimeOfDay> _findTimes(String lower) {
     final result = <TimeOfDay>[];
@@ -660,52 +885,62 @@ class PrescriptionParser {
       }
     }
 
-    // 1) Exact clock times written on the label.
-    for (final m in _clock.allMatches(lower)) {
+    List<TimeOfDay> sorted() =>
+        result..sort((a, b) => (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute));
+
+    // 1) Clock times written on the label: "8am", "8:30 PM", "20:00".
+    for (final m in _clock12.allMatches(lower)) {
       var h = int.parse(m.group(1)!);
       final min = int.tryParse(m.group(2) ?? '') ?? 0;
-      final pm = m.group(3)!.startsWith('p');
+      final pm = m.group(3)!.toLowerCase() == 'p';
       if (pm && h < 12) h += 12;
       if (!pm && h == 12) h = 0;
       add(h, min);
     }
-    if (result.isNotEmpty) {
-      result.sort((a, b) => (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute));
-      return result;
+    for (final m in _clock24.allMatches(lower)) {
+      add(int.parse(m.group(1)!), int.parse(m.group(2)!));
+    }
+    if (result.isNotEmpty) return sorted();
+
+    // 2) "1-0-1" = morning, noon, night.
+    final mnn = _mnn.firstMatch(lower);
+    if (mnn != null && (mnn.group(1) != '0' || mnn.group(2) != '0' || mnn.group(3) != '0')) {
+      if (mnn.group(1) != '0') add(8, 0);
+      if (mnn.group(2) != '0') add(13, 0);
+      if (mnn.group(3) != '0') add(20, 0);
+      return sorted();
     }
 
-    // 2) "every 8 hours" / "q8h", starting at 8:00 AM.
+    // 3) "every 8 hours" / "q8h" / "tuwing 8 oras", starting at 8:00 AM.
     final every = _everyHours.firstMatch(lower);
     if (every != null) {
-      final n = int.parse(every.group(1) ?? every.group(2)!);
+      final n = int.parse(every.group(1) ?? every.group(2) ?? every.group(3)!);
       if (n >= 2 && n <= 24) {
         for (int i = 0; i < 24 ~/ n && i < 6; i++) {
           add((8 + i * n) % 24, 0);
         }
-        return result;
+        return result; // keep 8 AM first, like the label says
       }
     }
 
-    // 3) "3x a day", "twice daily", BID/TID/QID.
-    int? count;
-    if (RegExp(r'\b(qid|four times|4\s?x|4 times)\b').hasMatch(lower)) {
-      count = 4;
-    } else if (RegExp(r'\b(tid|thrice|three times|3\s?x|3 times)\b').hasMatch(lower)) {
-      count = 3;
-    } else if (RegExp(r'\b(bid|twice|two times|2\s?x|2 times)\b').hasMatch(lower)) {
-      count = 2;
-    } else if (RegExp(r'\b(once|od|qd|daily|1\s?x|one time|every day|everyday)\b').hasMatch(lower)) {
-      count = 1;
+    // 4) Words for a time of day ("morning", "after dinner", "at bedtime", "gabi").
+    final words = <TimeOfDay>[];
+    for (final (re, t) in _timeWords) {
+      if (re.hasMatch(lower)) words.add(t);
     }
-    final night = RegExp(r'\b(bedtime|at night|hs|before sleep|evening)\b').hasMatch(lower);
 
+    // 5) How many times a day ("3x a day", "BID", "twice daily", "tatlong beses").
+    final count = _timesPerDay(lower.replaceAll(_perWeek, ' ').replaceAll(_duration, ' '));
+
+    if (words.isNotEmpty && (count == null || count == words.length)) {
+      for (final t in words) {
+        add(t.hour, t.minute);
+      }
+      return sorted();
+    }
     switch (count) {
       case 1:
-        if (night) {
-          add(21, 0);
-        } else {
-          add(8, 0);
-        }
+        add(8, 0);
         break;
       case 2:
         add(8, 0);
@@ -722,9 +957,98 @@ class PrescriptionParser {
         add(16, 0);
         add(20, 0);
         break;
-      default:
-        if (night) add(21, 0);
     }
-    return result;
+    return sorted();
+  }
+
+  static int? _timesPerDay(String t) {
+    const end = r'(?![a-z\d])';
+    if (RegExp(r'\b(q\.?i\.?d\.?|four times|4\s?x|x\s?4|4 times|apat na beses)' + end).hasMatch(t)) return 4;
+    if (RegExp(r'\b(t\.?i\.?d\.?|thrice|three times|3\s?x|x\s?3|3 times|tatlong beses)' + end).hasMatch(t)) {
+      return 3;
+    }
+    if (RegExp(r'\b(b\.?i\.?d\.?|twice|two times|2\s?x|x\s?2|2 times|dalawang beses)' + end).hasMatch(t)) {
+      return 2;
+    }
+    if (RegExp(r'\b(o\.?d\.?|q\.?d\.?|once|daily|1\s?x|x\s?1|one time|every\s?day|isang beses|araw[-\s]araw|'
+                r'q\.?am|q\.?pm|q\.?h\.?s|h\.?s)' +
+            end)
+        .hasMatch(t)) {
+      return 1;
+    }
+    return null;
+  }
+
+  // ---------------- days ----------------
+
+  /// How many days a week for "once a week", "2x a week", "weekly"... or null.
+  static int? _weeklyCount(String lower) {
+    final m = _perWeek.firstMatch(lower);
+    if (m == null) return null;
+    final word = (m.group(1) ?? m.group(2) ?? 'once').toLowerCase();
+    const counts = {'once': 1, 'one': 1, 'twice': 2, 'two': 2, 'thrice': 3, 'three': 3};
+    final n = counts[word] ?? int.tryParse(word) ?? 1;
+    return n.clamp(1, 7);
+  }
+
+  static ({List<String> days, bool found, bool everyOtherDay}) _findDays(String lower, int? weekly) {
+    final set = <String>{};
+
+    for (final m in _dayRange.allMatches(lower)) {
+      final from = kDaysOfWeek.indexOf(_dayWords[m.group(1)!.toLowerCase()]!);
+      final to = kDaysOfWeek.indexOf(_dayWords[m.group(2)!.toLowerCase()]!);
+      for (int i = from;; i = (i + 1) % 7) {
+        set.add(kDaysOfWeek[i]);
+        if (i == to) break;
+      }
+    }
+    for (final m in _dayCodes.allMatches(lower)) {
+      final code = m.group(1)!.replaceAll(RegExp(r'[\s-]'), '');
+      switch (code) {
+        case 'mwf':
+          set.addAll(['Mon', 'Wed', 'Fri']);
+          break;
+        case 'tth':
+          set.addAll(['Tue', 'Thu']);
+          break;
+        case 'tths':
+          set.addAll(['Tue', 'Thu', 'Sat']);
+          break;
+        case 'mf':
+          set.addAll(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']);
+          break;
+      }
+    }
+    if (RegExp(r'\bweekdays?\b|\bweekday only\b').hasMatch(lower)) {
+      set.addAll(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']);
+    }
+    if (RegExp(r'\bweekends?\b').hasMatch(lower)) set.addAll(['Sat', 'Sun']);
+    for (final m in _dayName.allMatches(lower)) {
+      final w = m.group(1)!.toLowerCase();
+      set.add(w.endsWith('linggo') ? 'Sun' : _dayWords[w]!);
+    }
+
+    if (set.isNotEmpty) {
+      return (days: kDaysOfWeek.where(set.contains).toList(), found: true, everyOtherDay: false);
+    }
+    if (_everyOtherDay.hasMatch(lower)) {
+      return (days: ['Mon', 'Wed', 'Fri', 'Sun'], found: true, everyOtherDay: true);
+    }
+    if (weekly != null) {
+      const spread = {
+        1: ['Mon'],
+        2: ['Mon', 'Thu'],
+        3: ['Mon', 'Wed', 'Fri'],
+        4: ['Mon', 'Tue', 'Thu', 'Fri'],
+        5: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+        6: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+      };
+      return (days: List.of(spread[weekly] ?? kDaysOfWeek), found: true, everyOtherDay: false);
+    }
+    // A daily frequency means every day.
+    final daily = _timesPerDay(lower.replaceAll(_duration, ' ')) != null ||
+        _everyHours.hasMatch(lower) ||
+        RegExp(r'\bdaily\b|every\s?day|araw[-\s]araw').hasMatch(lower);
+    return (days: List.of(kDaysOfWeek), found: daily, everyOtherDay: false);
   }
 }
