@@ -20,16 +20,12 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
-
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.myapp4"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = maxOf(flutter.minSdkVersion, 24) // newer Firebase needs 24+
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -58,6 +54,12 @@ flutter {
     source = "../.."
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+    }
+}
+
 configurations.all {
     resolutionStrategy {
         force("androidx.appcompat:appcompat:1.3.1")
@@ -66,7 +68,7 @@ configurations.all {
 
 dependencies {
     // Import the Firebase BoM
-    implementation(platform("com.google.firebase:firebase-bom:33.1.0"))
+    implementation(platform("com.google.firebase:firebase-bom:35.0.0"))
 
     // Add the dependencies for the Firebase products you're using
     // when using the BoM, you don't specify versions in Firebase library dependencies
@@ -74,7 +76,6 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-appcheck-playintegrity")
     implementation("com.google.firebase:firebase-analytics")
-    implementation("com.google.android.play:core:1.10.3")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("androidx.multidex:multidex:2.0.1")

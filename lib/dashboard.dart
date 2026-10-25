@@ -15,6 +15,7 @@ import 'package:collection/collection.dart';
 import 'dart:developer';
 import 'package:image_picker/image_picker.dart';
 import 'scan_to_schedule.dart';
+import 'scan_review_dialog.dart';
 import 'escalation_service.dart';
 import 'caregiver_service.dart';
 import 'caregiver_page.dart';
@@ -563,6 +564,45 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  /// Saves several scanned medicines as schedules in one go.
+  Future<int> _saveScannedMedicines(List<ScannedMedicineDraft> drafts) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || drafts.isEmpty) return 0;
+    final col = FirebaseFirestore.instance.collection('users').doc(user.uid).collection('schedules');
+    final batch = FirebaseFirestore.instance.batch();
+    final added = <Map<String, dynamic>>[];
+    for (final d in drafts) {
+      final ref = col.doc();
+      final dosage = d.dosage.isEmpty ? ScannedMedicineDraft.defaultDosage : d.dosage;
+      batch.set(ref, {
+        'name': d.name,
+        'dosage': dosage,
+        'schedules': d.times.map((t) => {'hour': t.hour, 'minute': t.minute}).toList(),
+        'repeatDays': d.days,
+        'createdAt': FieldValue.serverTimestamp(),
+        'isActive': true,
+      });
+      added.add({
+        'id': ref.id,
+        'name': d.name,
+        'dosage': dosage,
+        'schedules': List<TimeOfDay>.of(d.times),
+        'repeatDays': List<String>.of(d.days),
+        'createdAt': DateTime.now(),
+        'isActive': true,
+      });
+    }
+    await batch.commit();
+    if (mounted) {
+      setState(() {
+        allMedicines.addAll(added);
+        medicines = allMedicines.where((m) => m['isActive'] == true).toList();
+      });
+    }
+    _syncReminders();
+    return added.length;
+  }
+
   void _addMedicine() {
     final nameController = TextEditingController();
     final dosageController = TextEditingController();
@@ -571,6 +611,7 @@ class _DashboardPageState extends State<DashboardPage> {
     List<String> availableMedicines =
     pillBoxAssignments.map((e) => e['medicine'] ?? '').where((m) => m.trim().isNotEmpty).toList();
     bool isScanning = false;
+    bool handwritten = false;
     String? scanNote;
 
     showDialog(
@@ -584,12 +625,53 @@ class _DashboardPageState extends State<DashboardPage> {
               scanNote = null;
             });
             try {
-              final result = await PrescriptionScanner.scan(source);
+              final List<ScanResult>? results;
+              if (handwritten) {
+                results = await PrescriptionScanner.scanWithAi(source);
+              } else {
+                results = await PrescriptionScanner.scan(source);
+              }
               if (!context.mounted) return;
-              if (result == null) {
+              if (results == null) {
                 setStateDialog(() => isScanning = false);
                 return;
               }
+              final named = results.where((r) => r.name != null && r.name!.trim().isNotEmpty).toList();
+              if (named.length > 1) {
+                // Several medicines on one prescription: review them all and
+                // add the ticked ones in one go.
+                final picked = await showScanReviewDialog(
+                  context,
+                  named,
+                  medicines.map((m) => (m['name'] ?? '').toString()),
+                );
+                if (!context.mounted) return;
+                if (picked == null) {
+                  setStateDialog(() {
+                    isScanning = false;
+                    scanNote = 'Nothing added. You can scan again or fill in the form.';
+                  });
+                  return;
+                }
+                try {
+                  final count = await _saveScannedMedicines(picked);
+                  if (!context.mounted) return;
+                  Navigator.of(context).pop(); // close Add New Schedule
+                  if (mounted) {
+                    ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(
+                      content: Text('Added $count medicine${count == 1 ? '' : 's'} from the prescription.'),
+                    ));
+                  }
+                } catch (e) {
+                  if (!context.mounted) return;
+                  setStateDialog(() {
+                    isScanning = false;
+                    scanNote = 'Could not save: $e';
+                  });
+                }
+                return;
+              }
+              final result = named.isNotEmpty ? named.first : results.first;
               setStateDialog(() {
                 isScanning = false;
                 if (result.name != null) {
@@ -621,7 +703,15 @@ class _DashboardPageState extends State<DashboardPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text('Scan a prescription or label', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
+                  CheckboxListTile(
+                    value: handwritten,
+                    onChanged: isScanning ? null : (v) => setStateDialog(() => handwritten = v ?? false),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Handwritten prescription'),
+                    subtitle: const Text('Read by Gemini AI. Needs internet.'),
+                  ),
                   Row(
                     children: [
                       Expanded(
@@ -645,6 +735,12 @@ class _DashboardPageState extends State<DashboardPage> {
                     const Padding(
                       padding: EdgeInsets.only(top: 8),
                       child: LinearProgressIndicator(),
+                    ),
+                  if (isScanning && handwritten)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 6),
+                      child: Text('Reading the handwriting. This can take up to a minute.',
+                          style: TextStyle(fontSize: 12)),
                     ),
                   if (scanNote != null)
                     Container(

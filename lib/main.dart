@@ -8,6 +8,7 @@ import 'package:myapp4/auth_wrapper.dart';
 import 'notification_service.dart';
 import 'bluetooth_service.dart';
 import 'background_tasks.dart';
+import 'ocr_config.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 // Top-level function for handling background notification taps
@@ -52,9 +53,11 @@ void main() async {
 
   // Activate App Check
   await FirebaseAppCheck.instance.activate(
-    // Use the debug provider in debug builds
-    androidProvider: AndroidProvider.debug,
-    appleProvider: AppleProvider.debug,
+    // Debug provider: register the debug token in Firebase console > App Check.
+    providerAndroid: AndroidDebugProvider(
+      debugToken: OcrConfig.appCheckDebugToken.isEmpty ? null : OcrConfig.appCheckDebugToken,
+    ),
+    providerApple: const AppleDebugProvider(),
   );
 
   runApp(const ProgressReportApp());

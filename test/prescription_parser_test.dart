@@ -89,4 +89,29 @@ void main() {
     expect(r.summary, contains('Found: name, dosage'));
     expect(r.summary, contains('Not found: schedule'));
   });
+
+  group('several medicines on one prescription', () {
+    test('each medicine gets its own name, dose and times', () {
+      final all = PrescriptionParser.parseAll(
+        'Rx\n'
+        '1. Amoxicillin 500mg\n'
+        'Take 1 capsule 3x a day\n'
+        '2. Paracetamol 500mg\n'
+        'Take 1 tablet every 6 hours\n'
+        '3. Cetirizine 10mg\n'
+        'Take 1 tablet once daily at bedtime',
+      );
+      expect(all.map((r) => r.name), ['Amoxicillin', 'Paracetamol', 'Cetirizine']);
+      expect(all[0].times.length, 3);
+      expect(all[1].times.length, 4);
+      expect(all[2].times, [const TimeOfDay(hour: 21, minute: 0)]);
+      expect(all[0].dosage, '1 capsule (500 mg)');
+    });
+
+    test('a single medicine still returns one result', () {
+      final all = PrescriptionParser.parseAll('Losartan 50mg\nTake 1 tablet once daily');
+      expect(all.length, 1);
+      expect(all.single.name, 'Losartan');
+    });
+  });
 }

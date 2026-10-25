@@ -1,30 +1,260 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:firebase_ai/firebase_ai.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
+import 'ocr_config.dart';
 import 'time_utils.dart';
 
 /// Scan-to-Schedule: reads a prescription or medicine label with on-device OCR
 /// (Google ML Kit, works offline) and turns it into values for the Add Schedule
 /// form. The user always checks and edits the values before saving.
+///
+/// Handwritten mode sends the photo to Gemini through Firebase AI Logic (this
+/// app's Firebase project), which returns each medicine's name, dose, and times.
 class PrescriptionScanner {
-  static Future<ScanResult?> scan(ImageSource source) async {
-    final XFile? picked = await ImagePicker().pickImage(
-      source: source,
-      imageQuality: 90,
-      maxWidth: 2000,
-    );
+  static Future<XFile?> _pick(ImageSource source, {double maxWidth = 2000, int quality = 90}) =>
+      ImagePicker().pickImage(
+        source: source,
+        imageQuality: quality,
+        maxWidth: maxWidth,
+      );
+
+  /// On-device scan of printed text. Returns one result per medicine found
+  /// (several when the prescription lists more than one), or null if the
+  /// user cancelled the photo.
+  static Future<List<ScanResult>?> scan(ImageSource source) async {
+    final XFile? picked = await _pick(source);
     if (picked == null) return null;
 
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
     try {
       final input = InputImage.fromFilePath(picked.path);
       final RecognizedText text = await recognizer.processImage(input);
-      return PrescriptionParser.parse(text.text);
+      return PrescriptionParser.parseAll(text.text);
     } finally {
       await recognizer.close();
     }
   }
+
+  // ---------------- Handwritten mode (Gemini) ----------------
+
+  static const String _aiInstructions = '''
+You read photos of medical prescriptions and medicine labels for a medicine reminder app.
+Doctors' handwriting is often hard to read.
+Rules:
+- A prescription often lists several medicines (numbered 1., 2., 3., or separate Rx lines).
+  Return EVERY medicine as its own item, in the order written. List each medicine once.
+- Do not invent medicines; skip anything you cannot read.
+- Fix obvious spelling mistakes in medicine names only when you are confident.
+- Times: use clock times written on the prescription. Otherwise convert the frequency:
+  once a day = 08:00 (21:00 if at bedtime or at night); twice a day or BID = 08:00 and 20:00;
+  three times a day or TID = 08:00, 14:00, 20:00; four times a day or QID = 08:00, 12:00, 16:00, 20:00;
+  every N hours = start at 08:00 and add N hours until the day is full; as needed (PRN) = no times.
+- Ignore the patient's name, the doctor's name, clinic details, and license numbers.
+- If the image is not a prescription or medicine label, return an empty medicines list.
+''';
+
+  static final Schema _aiSchema = Schema.object(properties: {
+    'medicines': Schema.array(
+      description: 'Every medicine on the prescription or label. Empty if none.',
+      items: Schema.object(
+        properties: {
+          'name': Schema.string(
+              description: 'Medicine name only, without strength or form. '
+                  'Use the generic name if both brand and generic are written.'),
+          'strength': Schema.string(description: 'Strength, for example "500 mg".'),
+          'amount': Schema.string(
+              description: 'Amount per dose, for example "1 tablet" or "5 ml".'),
+          'times': Schema.array(
+              items: Schema.string(), description: 'Dose times in 24-hour HH:mm.'),
+          'weekly': Schema.boolean(description: 'True only if taken once a week.'),
+          'directions': Schema.string(
+              description: 'The directions as written, for example "1 cap 3x a day x 7 days".'),
+        },
+        optionalProperties: ['strength', 'amount', 'directions'],
+      ),
+    ),
+  });
+
+  /// Returns one result per medicine found (at least one), or null if the user
+  /// cancelled the photo.
+  static Future<List<ScanResult>?> scanWithAi(ImageSource source) async {
+    // 1600 px is enough to read handwriting and uploads faster than 2000 px.
+    final XFile? picked = await _pick(source, maxWidth: 1600, quality: 85);
+    if (picked == null) return null;
+    final bytes = await picked.readAsBytes();
+
+    // App Check token first, with its own short limit, so a stuck App Check
+    // shows a clear message instead of "the AI took too long".
+    try {
+      await FirebaseAppCheck.instance.getToken().timeout(OcrConfig.appCheckTimeout);
+    } on TimeoutException {
+      throw const ScanException(
+          'App Check did not answer. Add this phone\'s debug token in the Firebase console '
+          '(App Check > Apps > Manage debug tokens), then try again.');
+    } catch (_) {
+      // Not fatal here: if AI Logic really needs App Check, the request below
+      // fails with a clear App Check error.
+    }
+
+    final model = FirebaseAI.googleAI().generativeModel(
+      model: OcrConfig.model,
+      systemInstruction: Content.system(_aiInstructions),
+      generationConfig: GenerationConfig(
+        // No temperature: Gemini 3 models should keep the default (1.0); a low
+        // temperature can make them loop until the request times out.
+        maxOutputTokens: 4096, // a prescription never needs more; stops runaway answers
+        thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.low), // much faster
+        responseMimeType: 'application/json',
+        responseSchema: _aiSchema,
+      ),
+    );
+
+    try {
+      final response = await model.generateContent([
+        Content.multi([
+          const TextPart('Read this prescription or medicine label.'),
+          InlineDataPart(_mimeType(picked), bytes),
+        ]),
+      ]).timeout(OcrConfig.timeout);
+      return _resultsFromJson(response.text ?? '');
+    } on TimeoutException {
+      throw const ScanException('The AI took too long. Check your internet and try again.');
+    } on SocketException {
+      throw const ScanException(_noInternet);
+    } on http.ClientException {
+      throw const ScanException(_noInternet);
+    } on QuotaExceeded {
+      throw const ScanException(
+          'The free AI limit was reached. Try again later, or type the details in.');
+    } on ServiceApiNotEnabled {
+      throw const ScanException(
+          'Firebase AI Logic is not turned on yet. Open the Firebase console, go to AI Logic, '
+          'and click "Get started".');
+    } on FirebaseAIException catch (e) {
+      final m = e.message.toLowerCase();
+      if (m.contains('app check') || m.contains('appcheck') || m.contains('attestation')) {
+        throw const ScanException(
+            'App Check blocked the request. Add this phone\'s debug token in the Firebase '
+            'console (App Check > Apps > Manage debug tokens).');
+      }
+      if (m.contains('model') && (m.contains('not found') || m.contains('not supported'))) {
+        throw const ScanException(
+            'The AI model in lib/ocr_config.dart is not available. Change OcrConfig.model.');
+      }
+      throw ScanException('AI scan failed: ${e.message}');
+    } on FirebaseException catch (e) {
+      if (e.plugin.contains('app_check') || e.plugin.contains('appcheck')) {
+        throw const ScanException(
+            'App Check blocked the request. Add this phone\'s debug token in the Firebase '
+            'console (App Check > Apps > Manage debug tokens).');
+      }
+      throw ScanException('AI scan failed: ${e.message ?? e.code}');
+    }
+  }
+
+  static const String _noInternet = 'No internet connection. Handwritten scan needs internet.';
+
+  static String _mimeType(XFile f) {
+    final fromPicker = f.mimeType;
+    if (fromPicker != null && fromPicker.startsWith('image/')) return fromPicker;
+    final p = f.path.toLowerCase();
+    if (p.endsWith('.png')) return 'image/png';
+    if (p.endsWith('.webp')) return 'image/webp';
+    if (p.endsWith('.heic') || p.endsWith('.heif')) return 'image/heic';
+    return 'image/jpeg';
+  }
+
+  static String? _str(Object? v) {
+    final s = v is String ? v.trim() : '';
+    return s.isEmpty ? null : s;
+  }
+
+  /// Reads "08:00" (24-hour) or "8:00 AM".
+  static TimeOfDay? _parseTime(Object? v) {
+    if (v is! String) return null;
+    final m = RegExp(r'^\s*(\d{1,2}):(\d{2})\s*$').firstMatch(v);
+    if (m != null) {
+      final h = int.parse(m.group(1)!);
+      final min = int.parse(m.group(2)!);
+      if (h < 24 && min < 60) return TimeOfDay(hour: h, minute: min);
+      return null;
+    }
+    return parseTime12h(v);
+  }
+
+  static List<ScanResult> _resultsFromJson(String jsonText) {
+    Object? data;
+    try {
+      data = jsonDecode(jsonText);
+    } on FormatException {
+      data = null;
+    }
+    final meds = (data is Map && data['medicines'] is List) ? data['medicines'] as List : const [];
+
+    final results = <ScanResult>[];
+    for (final m in meds) {
+      if (m is! Map) continue;
+      final name = _str(m['name']);
+      if (name == null) continue;
+      final amount = _str(m['amount']);
+      final strength = _str(m['strength']);
+      final dosage =
+          (amount != null && strength != null) ? '$amount ($strength)' : (amount ?? strength);
+
+      final times = <TimeOfDay>[];
+      final rawTimes = m['times'];
+      if (rawTimes is List) {
+        for (final t in rawTimes) {
+          final parsed = _parseTime(t);
+          if (parsed != null &&
+              !times.any((x) => x.hour == parsed.hour && x.minute == parsed.minute)) {
+            times.add(parsed);
+          }
+        }
+      }
+      times.sort((a, b) => (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute));
+      final found = times.isNotEmpty;
+
+      results.add(ScanResult(
+        rawText: _str(m['directions']) ?? name,
+        name: name,
+        dosage: dosage,
+        times: found ? times : [const TimeOfDay(hour: 8, minute: 0)],
+        days: m['weekly'] == true ? ['Mon'] : List.of(kDaysOfWeek),
+        foundFrequency: found,
+      ));
+    }
+
+    if (results.isEmpty) {
+      results.add(ScanResult(
+        rawText: '',
+        name: null,
+        dosage: null,
+        times: const [TimeOfDay(hour: 8, minute: 0)],
+        days: List.of(kDaysOfWeek),
+        foundFrequency: false,
+      ));
+    }
+    return results;
+  }
+}
+
+/// An error with a message that is safe to show to the user.
+class ScanException implements Exception {
+  final String message;
+  const ScanException(this.message);
+
+  @override
+  String toString() => message;
 }
 
 class ScanResult {
@@ -85,6 +315,57 @@ class PrescriptionParser {
     'once', 'twice', 'every', 'daily', 'after', 'before', 'with',
   };
 
+  /// Splits a prescription with several medicines into one result each.
+  /// A new medicine starts on every line that names a known medicine, or has
+  /// a strength like "500 mg" after a name. Falls back to [parse] for one.
+  static List<ScanResult> parseAll(String raw) {
+    final lines = raw
+        .split(RegExp(r'[\r\n]+'))
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+
+    final starts = <int>[];
+    final names = <int, String>{};
+    for (int i = 0; i < lines.length; i++) {
+      final known = findKnownMedicine(lines[i]);
+      String? name = known;
+      if (name == null) {
+        final m = _strength.firstMatch(lines[i]);
+        if (m != null && m.start > 0) {
+          name = _cleanName(lines[i]
+              .substring(0, m.start)
+              .replaceAll(RegExp(r'^(\d+[.)]\s*)?(rx|℞)?[:.\s]*', caseSensitive: false), ''));
+        }
+      }
+      if (name == null) continue;
+      final found = name;
+      // Same medicine mentioned again (e.g. on its directions line): not a new one.
+      if (names.values.any((n) => n.toLowerCase() == found.toLowerCase())) continue;
+      starts.add(i);
+      names[i] = found;
+    }
+
+    if (starts.length < 2) return [parse(raw)];
+
+    final results = <ScanResult>[];
+    for (int k = 0; k < starts.length; k++) {
+      final from = starts[k];
+      final to = k + 1 < starts.length ? starts[k + 1] : lines.length;
+      final block = lines.sublist(from, to).join('\n');
+      final r = parse(block);
+      results.add(ScanResult(
+        rawText: r.rawText,
+        name: names[from],
+        dosage: r.dosage,
+        times: r.times,
+        days: r.days,
+        foundFrequency: r.foundFrequency,
+      ));
+    }
+    return results;
+  }
+
   static ScanResult parse(String raw) {
     final lines = raw
         .split(RegExp(r'[\r\n]+'))
@@ -101,12 +382,93 @@ class PrescriptionParser {
 
     return ScanResult(
       rawText: raw,
-      name: _findName(lines),
+      name: findKnownMedicine(raw) ?? _findName(lines),
       dosage: _findDosage(raw),
       times: times,
       days: weekly ? ['Mon'] : List.of(kDaysOfWeek),
       foundFrequency: foundFrequency,
     );
+  }
+
+  /// Common generic medicines. Used to fix small OCR misspellings
+  /// (for example "Amoxicilin" -> "Amoxicillin"). Add more names as needed.
+  static const List<String> knownMedicines = [
+    'Allopurinol', 'Ambroxol', 'Amlodipine', 'Amoxicillin', 'Ascorbic Acid', 'Aspirin',
+    'Atenolol', 'Atorvastatin', 'Azithromycin', 'Betahistine', 'Bisoprolol',
+    'Calcium Carbonate', 'Captopril', 'Carbocisteine', 'Carvedilol', 'Cefalexin',
+    'Cephalexin', 'Cefixime', 'Cefuroxime', 'Celecoxib', 'Cetirizine', 'Ciprofloxacin',
+    'Clarithromycin', 'Clonidine', 'Clopidogrel', 'Co-Amoxiclav', 'Colchicine',
+    'Dexamethasone', 'Diclofenac', 'Digoxin', 'Diphenhydramine', 'Domperidone',
+    'Doxycycline', 'Enalapril', 'Esomeprazole', 'Famotidine', 'Ferrous Sulfate',
+    'Fluoxetine', 'Folic Acid', 'Furosemide', 'Gabapentin', 'Gliclazide', 'Glimepiride',
+    'Hydrochlorothiazide', 'Ibuprofen', 'Irbesartan', 'Isosorbide', 'Lagundi',
+    'Levofloxacin', 'Levothyroxine', 'Lisinopril', 'Loperamide', 'Loratadine', 'Losartan',
+    'Mefenamic Acid', 'Metformin', 'Methyldopa', 'Metoclopramide', 'Metoprolol',
+    'Metronidazole', 'Montelukast', 'Naproxen', 'Nifedipine', 'Omeprazole', 'Pantoprazole',
+    'Paracetamol', 'Prednisone', 'Propranolol', 'Ranitidine', 'Rosuvastatin', 'Salbutamol',
+    'Sertraline', 'Simvastatin', 'Sitagliptin', 'Spironolactone', 'Telmisartan', 'Tramadol',
+    'Trimetazidine', 'Valsartan', 'Warfarin',
+  ];
+
+  /// Finds a known medicine in the text, allowing small spelling mistakes:
+  /// none for names under 5 letters, 1 for 5-9 letters, 2 for 10 or more.
+  static String? findKnownMedicine(String raw) {
+    final words =
+        raw.toLowerCase().split(RegExp(r'[^a-z]+')).where((w) => w.isNotEmpty).toList();
+    final candidates = <String>[...words];
+    for (int i = 0; i + 1 < words.length; i++) {
+      candidates.add(words[i] + words[i + 1]); // two-word names, split-up words
+    }
+
+    String? best;
+    int bestDistance = 1 << 30;
+    int bestLength = 0;
+    for (final med in knownMedicines) {
+      final key = med.toLowerCase().replaceAll(RegExp(r'[^a-z]'), '');
+      final allowed = key.length ~/ 5;
+      for (final c in candidates) {
+        if ((c.length - key.length).abs() > allowed) continue;
+        final d = _editDistance(c, key, allowed);
+        if (d > allowed) continue;
+        if (d < bestDistance || (d == bestDistance && key.length > bestLength)) {
+          best = med;
+          bestDistance = d;
+          bestLength = key.length;
+        }
+      }
+    }
+    return best;
+  }
+
+  /// Edit distance where a missing, extra, wrong, or swapped letter each count as 1.
+  /// Stops early and returns max + 1 once the distance is over [max].
+  static int _editDistance(String a, String b, int max) {
+    List<int>? prev2;
+    var prev = List<int>.generate(b.length + 1, (j) => j);
+    for (int i = 1; i <= a.length; i++) {
+      final cur = List<int>.filled(b.length + 1, 0);
+      cur[0] = i;
+      var rowMin = i;
+      for (int j = 1; j <= b.length; j++) {
+        final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+        var v = prev[j] + 1;
+        if (cur[j - 1] + 1 < v) v = cur[j - 1] + 1;
+        if (prev[j - 1] + cost < v) v = prev[j - 1] + cost;
+        if (prev2 != null &&
+            j > 1 &&
+            a.codeUnitAt(i - 1) == b.codeUnitAt(j - 2) &&
+            a.codeUnitAt(i - 2) == b.codeUnitAt(j - 1) &&
+            prev2[j - 2] + 1 < v) {
+          v = prev2[j - 2] + 1;
+        }
+        cur[j] = v;
+        if (v < rowMin) rowMin = v;
+      }
+      if (rowMin > max) return max + 1;
+      prev2 = prev;
+      prev = cur;
+    }
+    return prev[b.length];
   }
 
   static String? _findName(List<String> lines) {

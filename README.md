@@ -6,6 +6,7 @@ Flutter + Firebase medicine reminder app that works with **PillPalBox**, a Bluet
 - Medicine schedules with alarm-style reminders, intake confirmation, and Daily/Weekly history
 - PillPalBox pairing and slot assignment (lights the right compartment at dose time)
 - **Scan-to-Schedule** — scan a prescription or label (Google ML Kit OCR, offline) to pre-fill the Add Schedule form
+  - **Handwritten mode** — Gemini reads the photo through Firebase AI Logic (this app's Firebase project, free Spark plan) and fills in each medicine's name, dose, and times. Needs internet.
 - **Missed-Dose Safety Escalation** — follow-up reminders at +10 and +20 min, auto-marked missed at +30 min with a caregiver alert, and an "Are you okay?" check-in after 2 missed doses in a row (no answer in 15 min alerts the caregiver)
 - **Caregiver Companion Mode** — link a caregiver with a 6-character invite code; they see today's doses, 7-day adherence, and alerts, and can send a reminder
 

@@ -15,3 +15,6 @@
 -dontwarn com.google.mlkit.vision.text.japanese.**
 -dontwarn com.google.mlkit.vision.text.korean.**
 -keep class com.google.mlkit.** { *; }
+
+# Flutter references Play Core (deferred components), which this app does not use
+-dontwarn com.google.android.play.core.**
