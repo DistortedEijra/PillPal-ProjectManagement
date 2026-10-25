@@ -8,7 +8,14 @@ class OcrConfig {
   static const String model = 'gemini-3.8-flash';
 
   /// Give up if Gemini has not answered after this long.
-  static const Duration timeout = Duration(seconds: 90);
+  static const Duration timeout = Duration(seconds: 60);
+
+  /// Tried once if [model] gives no answer in time. Stable model with a long
+  /// support window. Leave empty to turn the backup off.
+  static const String fallbackModel = 'gemini-3.5-flash';
+
+  /// Time limit for the backup model.
+  static const Duration fallbackTimeout = Duration(seconds: 45);
 
   /// Give up on getting an App Check token after this long.
   static const Duration appCheckTimeout = Duration(seconds: 20);

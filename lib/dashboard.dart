@@ -739,7 +739,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   if (isScanning && handwritten)
                     const Padding(
                       padding: EdgeInsets.only(top: 6),
-                      child: Text('Reading the handwriting. This can take up to a minute.',
+                      child: Text('Reading the handwriting. This can take a minute or two.',
                           style: TextStyle(fontSize: 12)),
                     ),
                   if (scanNote != null)

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
@@ -105,47 +106,31 @@ Rules:
       // fails with a clear App Check error.
     }
 
-    final model = FirebaseAI.googleAI().generativeModel(
-      model: OcrConfig.model,
-      systemInstruction: Content.system(_aiInstructions),
-      generationConfig: GenerationConfig(
-        // No temperature: Gemini 3 models should keep the default (1.0); a low
-        // temperature can make them loop until the request times out.
-        maxOutputTokens: 4096, // a prescription never needs more; stops runaway answers
-        thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.low), // much faster
-        responseMimeType: 'application/json',
-        responseSchema: _aiSchema,
-      ),
-    );
-
-    final watch = Stopwatch()..start();
-    debugPrint('[AI scan] sending ${(bytes.length / 1024).round()} KB photo to ${OcrConfig.model}');
     try {
-      final response = await model.generateContent([
-        Content.multi([
-          const TextPart('Read this prescription or medicine label.'),
-          InlineDataPart(_mimeType(picked), bytes),
-        ]),
-      ]).timeout(OcrConfig.timeout);
-      debugPrint('[AI scan] answered in ${watch.elapsed.inSeconds} s');
-      return _resultsFromJson(response.text ?? '');
-    } on TimeoutException {
-      debugPrint('[AI scan] no answer after ${watch.elapsed.inSeconds} s, testing connection');
-      // Find out WHY: send a tiny text-only message.
-      final test = await _connectionTest();
-      if (test == null) {
-        throw ScanException(
-            'No answer from Gemini in ${OcrConfig.timeout.inSeconds} s, and a short test message '
-            'also got no answer, so this device cannot reach Gemini. '
-            'On the emulator: Device Manager > ⋮ > Cold Boot Now, or test on a real phone. '
-            'Also check the internet connection.');
+      final mime = _mimeType(picked);
+      final limit = OcrConfig.timeout;
+      String text;
+      try {
+        text = await _readPhoto(OcrConfig.model, bytes, mime, limit);
+      } on TimeoutException {
+        // No answer. Find out why with a tiny text-only message, then try the
+        // backup model once before giving up.
+        final test = await _connectionTest(OcrConfig.model);
+        if (test != null && test.startsWith('error:')) {
+          throw ScanException('Gemini test failed: ${test.substring(6)}');
+        }
+        final backup = OcrConfig.fallbackModel;
+        if (backup.isEmpty || backup == OcrConfig.model) {
+          throw ScanException(_timeoutMessage(test));
+        }
+        try {
+          text = await _readPhoto(backup, bytes, mime, OcrConfig.fallbackTimeout);
+        } on TimeoutException {
+          final test2 = await _connectionTest(backup);
+          throw ScanException(_timeoutMessage(test ?? test2));
+        }
       }
-      if (test.startsWith('error:')) {
-        throw ScanException('Gemini test failed: ${test.substring(6)}');
-      }
-      throw ScanException(
-          'Gemini is reachable (test answered in $test s) but reading this photo took over '
-          '${OcrConfig.timeout.inSeconds} s. Try again with a closer photo of just the medicines.');
+      return _resultsFromJson(text);
     } on SocketException {
       throw const ScanException(_noInternet);
     } on http.ClientException {
@@ -181,13 +166,55 @@ Rules:
 
   static const String _noInternet = 'No internet connection. Handwritten scan needs internet.';
 
+  static GenerativeModel _photoModel(String modelName) => FirebaseAI.googleAI().generativeModel(
+        model: modelName,
+        systemInstruction: Content.system(_aiInstructions),
+        generationConfig: GenerationConfig(
+          // No temperature: Gemini 3 models should keep the default (1.0); a low
+          // temperature can make them loop until the request times out.
+          maxOutputTokens: 4096, // a prescription never needs more; stops runaway answers
+          thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.low), // much faster
+          responseMimeType: 'application/json',
+          responseSchema: _aiSchema,
+        ),
+      );
+
+  /// Sends the photo to [modelName] and returns Gemini's JSON text.
+  static Future<String> _readPhoto(String modelName, Uint8List bytes, String mime, Duration limit) async {
+    final watch = Stopwatch()..start();
+    debugPrint('[AI scan] sending ${(bytes.length / 1024).round()} KB photo to $modelName');
+    try {
+      final response = await _photoModel(modelName).generateContent([
+        Content.multi([
+          const TextPart('Read this prescription or medicine label.'),
+          InlineDataPart(mime, bytes),
+        ]),
+      ]).timeout(limit);
+      debugPrint('[AI scan] $modelName answered in ${watch.elapsed.inSeconds} s');
+      return response.text ?? '';
+    } on TimeoutException {
+      debugPrint('[AI scan] $modelName gave no answer in ${limit.inSeconds} s');
+      rethrow;
+    }
+  }
+
+  static String _timeoutMessage(String? testSeconds) {
+    if (testSeconds == null) {
+      return 'Gemini did not answer, and a short test message also got no answer, so this '
+          'phone cannot reach Gemini right now. Check the internet (try switching between '
+          'Wi-Fi and mobile data) and try again.';
+    }
+    return 'Gemini is reachable (test answered in $testSeconds s) but could not read this photo '
+        'in time. Try again with a closer, well-lit photo of just the medicines.';
+  }
+
   /// Sends "Reply with OK" (no photo). Returns the seconds it took, null if
-  /// there was no answer in 20 s, or "error:<message>" if it failed.
-  static Future<String?> _connectionTest() async {
+  /// there was no answer in 15 s, or "error:<message>" if it failed.
+  static Future<String?> _connectionTest(String modelName) async {
     final watch = Stopwatch()..start();
     try {
       final model = FirebaseAI.googleAI().generativeModel(
-        model: OcrConfig.model,
+        model: modelName,
         generationConfig: GenerationConfig(
           maxOutputTokens: 20,
           thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.minimal),
@@ -195,11 +222,11 @@ Rules:
       );
       await model
           .generateContent([Content.text('Reply with OK')])
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 15));
       debugPrint('[AI scan] test answered in ${watch.elapsed.inSeconds} s');
       return '${watch.elapsed.inSeconds}';
     } on TimeoutException {
-      debugPrint('[AI scan] test got no answer in 20 s');
+      debugPrint('[AI scan] test ($modelName) got no answer in 15 s');
       return null;
     } catch (e) {
       debugPrint('[AI scan] test failed: $e');
