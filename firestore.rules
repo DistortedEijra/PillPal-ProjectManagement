@@ -2,8 +2,9 @@ rules_version = '2';
 
 // PillPal Firestore rules.
 // Paste into Firebase console -> Firestore Database -> Rules -> Publish.
-// Each user owns their own data; linked caregivers can READ it, send reminders
-// (nudges), and link themselves only with a valid invite code.
+// Each user owns their own data; linked caregivers can READ it, edit the
+// patient's medicine schedules, send reminders (nudges), and link themselves
+// only with a valid invite code.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -40,6 +41,17 @@ service cloud.firestore {
       match /patients/{patientUid} {
         // the patient may remove a caregiver's link to them
         allow delete: if signedIn() && request.auth.uid == patientUid;
+      }
+
+      // A linked caregiver may edit the patient's medicines (name, dose,
+      // times, days) but not create, delete, or change anything else.
+      match /schedules/{scheduleId} {
+        allow update: if isCaregiverOf(uid) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'dosage', 'schedules', 'repeatDays',
+            'updatedAt', 'updatedBy', 'updatedByName', 'renamedFrom'
+          ]) &&
+          request.resource.data.updatedBy == request.auth.uid;
       }
 
       match /nudges/{nudgeId} {

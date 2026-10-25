@@ -21,6 +21,7 @@ import 'caregiver_service.dart';
 import 'caregiver_page.dart';
 import 'time_utils.dart';
 import 'reminder_scheduler.dart';
+import 'medicine_editor.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -50,6 +51,9 @@ class _DashboardPageState extends State<DashboardPage> {
   final CareListeners _careListeners = CareListeners();
   bool _checkInDialogOpen = false;
   bool _remindersScheduled = false; // true once real Android alarms are set
+  // Live updates of the schedules, so edits made by a caregiver show up here
+  // and the reminders are re-scheduled.
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _schedulesSub;
 
   @override
   void initState() {
@@ -98,6 +102,7 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void dispose() {
     _scheduleTimer?.cancel();
+    _schedulesSub?.cancel();
     _connectionSubscription.cancel();
     _dataSubscription.cancel();
     _notificationTapSubscription.cancel();
@@ -473,6 +478,26 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  Map<String, dynamic> _medicineFromDoc(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data();
+    final List<TimeOfDay> schedules = ((data['schedules'] as List<dynamic>?) ?? []).map((s) {
+      return TimeOfDay(hour: (s['hour'] as num).toInt(), minute: (s['minute'] as num).toInt());
+    }).toList();
+
+    final Timestamp? createdTs = data['createdAt'] as Timestamp?;
+    final DateTime createdAt = createdTs != null ? createdTs.toDate() : DateTime.now();
+
+    return {
+      'id': doc.id,
+      'name': data['name'],
+      'dosage': data['dosage'],
+      'schedules': schedules,
+      'repeatDays': ((data['repeatDays'] as List<dynamic>?) ?? []).cast<String>(),
+      'createdAt': createdAt,
+      'isActive': data['isActive'] ?? true,
+    };
+  }
+
   Future<void> _fetchSchedules(String userId) async {
     try {
       final snapshot = await FirebaseFirestore.instance
@@ -481,25 +506,7 @@ class _DashboardPageState extends State<DashboardPage> {
           .collection('schedules')
           .get();
 
-      final fetchedMedicines = snapshot.docs.map((doc) {
-        final data = doc.data();
-        final List<TimeOfDay> schedules = (data['schedules'] as List<dynamic>).map((s) {
-          return TimeOfDay(hour: s['hour'], minute: s['minute']);
-        }).toList();
-
-        final Timestamp? createdTs = data['createdAt'] as Timestamp?;
-        final DateTime createdAt = createdTs != null ? createdTs.toDate() : DateTime.now();
-
-        return {
-          'id': doc.id,
-          'name': data['name'],
-          'dosage': data['dosage'],
-          'schedules': schedules,
-          'repeatDays': (data['repeatDays'] as List<dynamic>).cast<String>(),
-          'createdAt': createdAt,
-          'isActive': data['isActive'] ?? true,
-        };
-      }).toList();
+      final fetchedMedicines = snapshot.docs.map(_medicineFromDoc).toList();
 
       if (mounted) {
         setState(() {
@@ -509,6 +516,123 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     } catch (e) {
       // Handle error, e.g., show a snackbar
+    }
+    _listenForScheduleChanges(userId);
+  }
+
+  /// Keeps the list and the reminder alarms up to date when a schedule is
+  /// changed somewhere else (for example by a caregiver on their phone).
+  void _listenForScheduleChanges(String userId) {
+    _schedulesSub?.cancel();
+    var first = true;
+    final announced = <String>{}; // each caregiver edit is shown once
+    _schedulesSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .collection('schedules')
+        .snapshots()
+        .listen((snap) async {
+      if (first) {
+        first = false; // same data as the fetch above
+        return;
+      }
+      if (snap.metadata.hasPendingWrites) return; // our own change, already applied
+
+      final fromOthers = <String>[];
+      for (final change in snap.docChanges) {
+        final d = change.doc.data();
+        if (d == null || change.type != DocumentChangeType.modified) continue;
+        final editKey = '${change.doc.id}:${(d['updatedAt'] as Timestamp?)?.millisecondsSinceEpoch}';
+        if (d['updatedBy'] != null && d['updatedBy'] != userId && announced.add(editKey)) {
+          fromOthers.add('${d['updatedByName'] ?? 'Your caregiver'} updated ${d['name']}');
+        }
+        // A caregiver renamed a medicine: rename its PillPalBox slot too.
+        final renamedFrom = d['renamedFrom'] as String?;
+        if (renamedFrom != null) {
+          await _renameSlotMedicine(renamedFrom, (d['name'] ?? '').toString());
+          try {
+            await change.doc.reference.update({'renamedFrom': FieldValue.delete()});
+          } catch (_) {}
+        }
+      }
+
+      final updated = snap.docs.map(_medicineFromDoc).toList();
+      if (!mounted) return;
+      setState(() {
+        allMedicines = updated;
+        medicines = updated.where((m) => m['isActive'] == true).toList();
+      });
+      await _syncReminders();
+      if (fromOthers.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(fromOthers.join('\n'))));
+      }
+    }, onError: (e) => log('Schedule updates stopped: $e'));
+  }
+
+  /// Renames a medicine in the PillPalBox slots (slots match by name).
+  Future<void> _renameSlotMedicine(String oldName, String newName) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || newName.trim().isEmpty) return;
+    var changed = false;
+    final updated = pillBoxAssignments.map((slot) {
+      if ((slot['medicine'] ?? '').trim().toLowerCase() == oldName.trim().toLowerCase()) {
+        changed = true;
+        return {...slot, 'medicine': newName.trim()};
+      }
+      return slot;
+    }).toList();
+    if (!changed) return;
+    if (mounted) setState(() => pillBoxAssignments = updated);
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .set({'pillbox_assignments': updated}, SetOptions(merge: true));
+    } catch (e) {
+      log('Could not rename PillPalBox slot: $e');
+    }
+  }
+
+  /// Patient side: edit one of their scheduled medicines.
+  Future<void> _editMedicine(Map<String, dynamic> med) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final oldName = (med['name'] ?? '').toString();
+    final edit = await showMedicineEditor(context, initial: MedicineEdit.fromLocal(med));
+    if (edit == null || !mounted) return;
+    try {
+      await ScheduleEdits.save(
+        ownerUid: user.uid,
+        scheduleId: med['id'] as String,
+        edit: edit,
+        oldName: oldName,
+        editorName: givenName,
+      );
+      if (edit.name.toLowerCase() != oldName.toLowerCase()) {
+        await _renameSlotMedicine(oldName, edit.name);
+      }
+      if (!mounted) return;
+      setState(() {
+        final i = allMedicines.indexWhere((m) => m['id'] == med['id']);
+        if (i != -1) {
+          allMedicines[i] = {
+            ...allMedicines[i],
+            'name': edit.name,
+            'dosage': edit.dosage,
+            'schedules': edit.times,
+            'repeatDays': edit.days,
+          };
+        }
+        medicines = allMedicines.where((m) => m['isActive'] == true).toList();
+      });
+      await _syncReminders();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${edit.name} updated.')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not save changes: $e')));
+      }
     }
   }
 
@@ -1643,6 +1767,11 @@ class _DashboardPageState extends State<DashboardPage> {
                     color: Colors.black54,
                   ),
                 ),
+                if (medicines.isNotEmpty)
+                  const Text(
+                    'Tap a medicine to edit it. Press and hold to delete.',
+                    style: TextStyle(fontSize: 12, color: Colors.black45),
+                  ),
                 const SizedBox(height: 8),
                 Expanded(
                   child: medicines.isEmpty
@@ -1663,16 +1792,20 @@ class _DashboardPageState extends State<DashboardPage> {
                         nextSchedule = earliestSchedule.format(context);
                       }
                       final repeatDaysStr = (med['repeatDays'] as List).join(', ');
-                      return GestureDetector(
-                        onLongPress: () => _showDeleteConfirmationDialog(med),
-                        child: Card(
-                          margin: const EdgeInsets.symmetric(vertical: 8),
-                          child: ListTile(
-                            isThreeLine: true,
-                            title: Text(med['name']),
-                            subtitle: Text(
-                              'Next intake: $nextSchedule\nDosage: ${med['dosage']}\nRepeat: $repeatDaysStr',
-                            ),
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 8),
+                        child: ListTile(
+                          isThreeLine: true,
+                          onTap: () => _editMedicine(med),
+                          onLongPress: () => _showDeleteConfirmationDialog(med),
+                          title: Text(med['name']),
+                          subtitle: Text(
+                            'Next intake: $nextSchedule\nDosage: ${med['dosage']}\nRepeat: $repeatDaysStr',
+                          ),
+                          trailing: IconButton(
+                            tooltip: 'Edit',
+                            icon: const Icon(Icons.edit, color: Color(0xFF116FA9)),
+                            onPressed: () => _editMedicine(med),
                           ),
                         ),
                       );

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import 'caregiver_service.dart';
+import 'medicine_editor.dart';
 import 'reminder_chat_page.dart';
 import 'time_utils.dart';
 
@@ -330,7 +331,8 @@ class PatientMonitorPage extends StatelessWidget {
         builder: (context, schedSnap) {
           if (schedSnap.hasError) return Padding(padding: const EdgeInsets.all(16), child: _errorText(schedSnap.error));
           if (!schedSnap.hasData) return const Center(child: CircularProgressIndicator());
-          final schedules = schedSnap.data!.docs.map((d) => d.data()).where((d) => d['isActive'] != false).toList();
+          final activeDocs = schedSnap.data!.docs.where((d) => d.data()['isActive'] != false).toList();
+          final schedules = activeDocs.map((d) => d.data()).toList();
 
           return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
             stream: service.logsOf(patientUid),
@@ -343,6 +345,7 @@ class PatientMonitorPage extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
                 children: [
                   _todayCard(schedules, logs),
+                  _medicinesCard(context, activeDocs),
                   _weekCard(logs),
                   _alertsCard(service),
                 ],
@@ -418,6 +421,72 @@ class PatientMonitorPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// The patient's medicines; the caregiver can edit each one.
+  Widget _medicinesCard(BuildContext context, List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Medicines', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text('Tap ✎ to change a dose, time or day.',
+                style: TextStyle(fontSize: 12, color: Colors.black45)),
+            const SizedBox(height: 4),
+            if (docs.isEmpty) const Text('No medicines scheduled.', style: TextStyle(color: Colors.grey)),
+            ...docs.map((doc) {
+              final m = MedicineEdit.fromFirestore(doc.data());
+              return ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.medication, color: _brand),
+                title: Text('${m.name}  •  ${m.dosage}'),
+                subtitle: Text('${m.timesText}\n${m.daysText}'),
+                isThreeLine: true,
+                trailing: IconButton(
+                  tooltip: 'Edit',
+                  icon: const Icon(Icons.edit, color: _brand),
+                  onPressed: () => _editPatientMedicine(context, doc.id, m),
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editPatientMedicine(BuildContext context, String scheduleId, MedicineEdit current) async {
+    final edit = await showMedicineEditor(
+      context,
+      initial: current,
+      title: 'Edit ${current.name}',
+      subtitle: "Changes go to $patientName's app and update their reminders.",
+    );
+    if (edit == null || !context.mounted) return;
+    try {
+      await ScheduleEdits.save(
+        ownerUid: patientUid,
+        scheduleId: scheduleId,
+        edit: edit,
+        oldName: current.name,
+        editorName: await CaregiverService().myName(),
+      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${edit.name} updated for $patientName.')));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        final denied = e.toString().contains('permission-denied');
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(denied
+              ? 'Not allowed yet: publish the new firestore.rules in the Firebase console.'
+              : 'Could not save: $e'),
+        ));
+      }
+    }
   }
 
   Widget _weekCard(Map<String, Map<String, dynamic>> logs) {
