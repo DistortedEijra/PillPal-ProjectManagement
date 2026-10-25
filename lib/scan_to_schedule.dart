@@ -108,25 +108,47 @@ Rules:
 
     try {
       final mime = _mimeType(picked);
-      final limit = OcrConfig.timeout;
-      String text;
-      try {
-        text = await _readPhoto(OcrConfig.model, bytes, mime, limit);
-      } on TimeoutException {
-        // No answer. Find out why with a tiny text-only message, then try the
-        // backup model once before giving up.
-        final test = await _connectionTest(OcrConfig.model);
-        final backup = OcrConfig.fallbackModel;
-        if (backup.isEmpty || backup == OcrConfig.model) {
-          throw ScanException(_timeoutMessage(test));
-        }
+      // Try each model in turn. Free-tier Gemini models are often "busy" (high
+      // demand) or slow; when one is, move straight on to the next.
+      var busy = 0;
+      var limited = 0;
+      var missing = 0;
+      for (final modelName in OcrConfig.models) {
         try {
-          text = await _readPhoto(backup, bytes, mime, OcrConfig.fallbackTimeout);
+          final text = await _readPhotoAnyThinking(modelName, bytes, mime);
+          return _resultsFromJson(text);
         } on TimeoutException {
-          throw ScanException(_timeoutMessage(test ?? await _connectionTest(backup)));
+          // too slow: try the next model
+        } on QuotaExceeded {
+          debugPrint('[AI scan] $modelName: free limit reached');
+          limited++; // free limits are per model, so the next one may still work
+        } on ServerException catch (e) {
+          if (_isBusy(e.message)) {
+            debugPrint('[AI scan] $modelName is busy: ${e.message}');
+            busy++;
+          } else if (_isModelMissing(e.message)) {
+            debugPrint('[AI scan] $modelName is not available: ${e.message}');
+            missing++;
+          } else {
+            rethrow;
+          }
         }
       }
-      return _resultsFromJson(text);
+      if (missing == OcrConfig.models.length) {
+        throw const ScanException(
+            'None of the AI models in lib/ocr_config.dart are available. Update OcrConfig.models.');
+      }
+      if (limited > 0 && busy == 0) {
+        throw const ScanException(
+            'The free AI limit was reached. Try again later, or type the details in.');
+      }
+      if (busy > 0) {
+        throw const ScanException(
+            'Gemini is very busy right now (high demand on Google\'s side). '
+            'Wait a minute and try again, or type the details in.');
+      }
+      // Every model was too slow: check whether this phone can reach Gemini.
+      throw ScanException(_timeoutMessage(await _connectionTest(OcrConfig.models.first)));
     } on SocketException {
       throw const ScanException(_noInternet);
     } on http.ClientException {
@@ -147,7 +169,7 @@ Rules:
       }
       if (m.contains('model') && (m.contains('not found') || m.contains('not supported'))) {
         throw const ScanException(
-            'The AI model in lib/ocr_config.dart is not available. Change OcrConfig.model.');
+            'The AI model in lib/ocr_config.dart is not available. Update OcrConfig.models.');
       }
       throw ScanException('AI scan failed: ${e.message}');
     } on FirebaseException catch (e) {
@@ -162,25 +184,58 @@ Rules:
 
   static const String _noInternet = 'No internet connection. Handwritten scan needs internet.';
 
-  static GenerativeModel _photoModel(String modelName) => FirebaseAI.googleAI().generativeModel(
+  static GenerativeModel _photoModel(String modelName, {required bool lowThinking}) =>
+      FirebaseAI.googleAI().generativeModel(
         model: modelName,
         systemInstruction: Content.system(_aiInstructions),
         generationConfig: GenerationConfig(
           // No temperature: Gemini 3 models should keep the default (1.0); a low
           // temperature can make them loop until the request times out.
           maxOutputTokens: 4096, // a prescription never needs more; stops runaway answers
-          thinkingConfig: ThinkingConfig.withThinkingLevel(ThinkingLevel.low), // much faster
+          thinkingConfig: lowThinking
+              ? ThinkingConfig.withThinkingLevel(ThinkingLevel.low) // much faster
+              : null,
           responseMimeType: 'application/json',
           responseSchema: _aiSchema,
         ),
       );
 
+  /// "The model is overloaded / experiencing high demand / unavailable".
+  static bool _isBusy(String message) {
+    final m = message.toLowerCase();
+    return m.contains('high demand') ||
+        m.contains('overloaded') ||
+        m.contains('unavailable') ||
+        m.contains('try again later') ||
+        m.contains('503');
+  }
+
+  static bool _isModelMissing(String message) {
+    final m = message.toLowerCase();
+    return m.contains('model') &&
+        !m.contains('thinking') &&
+        (m.contains('not found') || m.contains('not supported'));
+  }
+
+  /// Reads the photo with low thinking; if this model does not accept that
+  /// setting, asks again with the model's default thinking.
+  static Future<String> _readPhotoAnyThinking(String modelName, Uint8List bytes, String mime) async {
+    try {
+      return await _readPhoto(modelName, bytes, mime, OcrConfig.timeoutPerModel, lowThinking: true);
+    } on ServerException catch (e) {
+      if (!e.message.toLowerCase().contains('thinking')) rethrow;
+      debugPrint('[AI scan] $modelName rejected the thinking level, retrying with defaults');
+      return _readPhoto(modelName, bytes, mime, OcrConfig.timeoutPerModel, lowThinking: false);
+    }
+  }
+
   /// Sends the photo to [modelName] and returns Gemini's JSON text.
-  static Future<String> _readPhoto(String modelName, Uint8List bytes, String mime, Duration limit) async {
+  static Future<String> _readPhoto(String modelName, Uint8List bytes, String mime, Duration limit,
+      {required bool lowThinking}) async {
     final watch = Stopwatch()..start();
     debugPrint('[AI scan] sending ${(bytes.length / 1024).round()} KB photo to $modelName');
     try {
-      final response = await _photoModel(modelName).generateContent([
+      final response = await _photoModel(modelName, lowThinking: lowThinking).generateContent([
         Content.multi([
           const TextPart('Read this prescription or medicine label.'),
           InlineDataPart(mime, bytes),

@@ -3,19 +3,17 @@
 /// The photo is read by Gemini through Firebase AI Logic, using this app's
 /// Firebase project (Gemini Developer API, free Spark plan).
 class OcrConfig {
-  /// Gemini model that reads the prescriptions. If Google retires it, put a
-  /// current model name here (Firebase console > AI Logic lists them).
-  static const String model = 'gemini-3.8-flash';
+  /// Gemini models that read the prescriptions, tried in this order. If one
+  /// is busy ("high demand") or too slow, the next one is tried. If Google
+  /// retires a model, replace it (Firebase console > AI Logic lists models).
+  static const List<String> models = [
+    'gemini-3.5-flash', // stable, supported until at least May 2027
+    'gemini-3.1-flash-lite', // lighter, usually less busy
+    'gemini-3.8-flash', // newest, but often in high demand
+  ];
 
-  /// Give up if Gemini has not answered after this long.
-  static const Duration timeout = Duration(seconds: 60);
-
-  /// Tried once if [model] gives no answer in time. Stable model with a long
-  /// support window. Leave empty to turn the backup off.
-  static const String fallbackModel = 'gemini-3.5-flash';
-
-  /// Time limit for the backup model.
-  static const Duration fallbackTimeout = Duration(seconds: 45);
+  /// Time limit for each model before moving on to the next one.
+  static const Duration timeoutPerModel = Duration(seconds: 35);
 
   /// Give up on getting an App Check token after this long.
   static const Duration appCheckTimeout = Duration(seconds: 20);
