@@ -79,4 +79,21 @@ void main() {
     expect(c.params['time'], '8:00 PM');
     expect((c.params['meds'] as List).single['name'], 'Losartan');
   });
+
+  test('the dose due soonest is scheduled first', () {
+    // Friday 30 Oct 2026, 00:31: a dose at 00:32 today comes before Monday 8:00.
+    final now = DateTime(2026, 10, 30, 0, 31, 40);
+    final plan = planWeeklyReminders([
+      med('Metformin', ['Mon'], [eight]),
+      med('Losartan', ['Fri'], [const TimeOfDay(hour: 0, minute: 32)]),
+      med('Vitamin D3', ['Fri'], [twenty]),
+    ], []);
+    final ordered = soonestFirst(plan, now);
+    expect(ordered.map((r) => r.meds.first['name']), ['Losartan', 'Vitamin D3', 'Metformin']);
+  });
+
+  test('in-app reminder uses the same id as the weekly alarm', () {
+    final plan = planWeeklyReminders([med('Losartan', ['Fri'], [eight])], []);
+    expect(plan.single.id, reminderIdFor(5, eight));
+  });
 }

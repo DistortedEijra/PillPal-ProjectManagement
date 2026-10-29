@@ -31,6 +31,17 @@ class PlannedReminder {
   String get key => '$weekday|${time.hour}|${time.minute}';
 }
 
+/// The notification id of the weekly reminder for [weekday] (Mon = 1) at [time].
+/// The in-app check uses the same id, so a reminder never shows twice.
+int reminderIdFor(int weekday, TimeOfDay time) =>
+    stableId('weekly_reminder|$weekday|${time.hour}|${time.minute}');
+
+/// Orders reminders by when they next ring, soonest first.
+List<PlannedReminder> soonestFirst(List<PlannedReminder> plan, DateTime now) {
+  final next = {for (final r in plan) r: nextWeeklyAt(r.weekday, r.time.hour, r.time.minute, from: now)};
+  return List.of(plan)..sort((a, b) => next[a]!.compareTo(next[b]!));
+}
+
 /// Builds the list of weekly reminder alarms from the user's active schedules.
 /// [medicines] use the dashboard format: name, dosage, schedules (TimeOfDay),
 /// repeatDays ('Mon'..'Sun'), isActive.
@@ -74,7 +85,7 @@ List<PlannedReminder> planWeeklyReminders(
     final time = TimeOfDay(hour: int.parse(parts[1]), minute: int.parse(parts[2]));
     final meds = groups[key]!;
     plan.add(PlannedReminder(
-      id: stableId('weekly_reminder|$key'),
+      id: reminderIdFor(weekday, time),
       weekday: weekday,
       time: time,
       title: 'Medicine Reminder',
@@ -134,27 +145,68 @@ class ReminderScheduler {
   static const String _bgIdsKey = 'scheduled_background_ids';
   static List<PlannedReminder> _lastPlan = const [];
 
+  // Only one sync runs at a time; changes that arrive meanwhile are applied
+  // right after it (editing a medicine used to start two syncs at once).
+  static Future<int>? _running;
+  static bool _again = false;
+  static List<Map<String, dynamic>> _medicines = const [];
+  static List<Map<String, String>> _assignments = const [];
+  static int _generation = 0; // bumped by cancelAll() to stop a running sync
+
   /// Replaces all previously scheduled alarms with the current plan.
   /// Returns how many reminders are now scheduled.
   static Future<int> sync(
     List<Map<String, dynamic>> medicines,
     List<Map<String, String>> pillBoxAssignments,
+  ) {
+    _medicines = List.of(medicines);
+    _assignments = List.of(pillBoxAssignments);
+    if (_running != null) {
+      _again = true;
+      return _running!;
+    }
+    _running = _runSyncs().whenComplete(() => _running = null);
+    return _running!;
+  }
+
+  static Future<int> _runSyncs() async {
+    int count;
+    do {
+      _again = false;
+      count = await _syncOnce(_medicines, _assignments, _generation);
+    } while (_again);
+    return count;
+  }
+
+  static Future<int> _syncOnce(
+    List<Map<String, dynamic>> medicines,
+    List<Map<String, String>> pillBoxAssignments,
+    int generation,
   ) async {
-    await cancelAll();
-    final plan = planWeeklyReminders(medicines, pillBoxAssignments);
+    // Soonest first: a dose set for the next minute gets its alarm right away
+    // instead of after every other alarm (registering them all takes a while).
+    final plan = soonestFirst(planWeeklyReminders(medicines, pillBoxAssignments), DateTime.now());
     _lastPlan = plan;
     final notificationIds = <String>[];
     final backgroundIds = <String>[];
     int reminders = 0;
 
+    // Reminders first, then follow-ups, then background checks.
     for (final r in plan) {
+      if (generation != _generation) return _abort(notificationIds, backgroundIds); // logged out meanwhile
       if (await _schedule(r)) {
         notificationIds.add('${r.id}');
         reminders++;
       }
+    }
+    for (final r in plan) {
+      if (generation != _generation) return _abort(notificationIds, backgroundIds);
       for (final f in planFollowUps(r)) {
         if (await _schedule(f)) notificationIds.add('${f.id}');
       }
+    }
+    for (final r in plan) {
+      if (generation != _generation) return _abort(notificationIds, backgroundIds);
       final check = planDueCheck(r);
       try {
         final ok = await BackgroundTasks.scheduleDueCheck(
@@ -168,10 +220,40 @@ class ReminderScheduler {
       }
     }
 
+    // Scheduling an id again replaces it, so only alarms that are no longer
+    // in the plan (old times, deleted medicines) need cancelling.
     final store = await SharedPreferences.getInstance();
+    final oldIds = (store.getStringList(_idsKey) ?? const <String>[]).toSet()..removeAll(notificationIds);
+    final oldBgIds = (store.getStringList(_bgIdsKey) ?? const <String>[]).toSet()..removeAll(backgroundIds);
+    for (final id in oldIds) {
+      final n = int.tryParse(id);
+      if (n != null) await NotificationService().cancelNotification(id: n);
+    }
+    for (final id in oldBgIds) {
+      final n = int.tryParse(id);
+      if (n != null) {
+        try {
+          await BackgroundTasks.cancel(n);
+        } catch (_) {}
+      }
+    }
+    if (generation != _generation) return _abort(notificationIds, backgroundIds);
     await store.setStringList(_idsKey, notificationIds);
     await store.setStringList(_bgIdsKey, backgroundIds);
     return reminders;
+  }
+
+  /// Logged out during a sync: remove the alarms this sync already set.
+  static Future<int> _abort(List<String> ids, List<String> bgIds) async {
+    for (final id in ids) {
+      await NotificationService().cancelNotification(id: int.parse(id));
+    }
+    for (final id in bgIds) {
+      try {
+        await BackgroundTasks.cancel(int.parse(id));
+      } catch (_) {}
+    }
+    return 0;
   }
 
   static Future<bool> _schedule(PlannedReminder r, {DateTime? notBefore}) async {
@@ -210,6 +292,8 @@ class ReminderScheduler {
 
   /// Cancels every alarm this app scheduled (used on logout too).
   static Future<void> cancelAll() async {
+    _generation++; // stops a sync that is still running
+    _again = false;
     final store = await SharedPreferences.getInstance();
     for (final id in store.getStringList(_idsKey) ?? const <String>[]) {
       final n = int.tryParse(id);

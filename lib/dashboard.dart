@@ -301,12 +301,22 @@ class _DashboardPageState extends State<DashboardPage> {
         ? '${dueMedicines.length} medicines are due.'
         : 'Time to take your ${dueMedicines.first['name']}.';
 
-    // Use a unique ID for the notification, e.g., from timestamp
-    final int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Same id as the scheduled weekly alarm for this time, so the reminder
+    // never shows twice.
+    final int notificationId =
+        reminderIdFor(now.weekday, TimeOfDay(hour: now.hour, minute: now.minute));
 
-    // The scheduled Android alarm already shows this reminder; only show one
-    // here if scheduling failed, so the user never gets it twice.
-    if (!_remindersScheduled) {
+    // Normally the scheduled Android alarm shows this reminder. It can miss
+    // (for example the time was changed seconds before, or the phone delayed
+    // it), so give it a few seconds, and show it from here if it isn't there.
+    var showHere = true;
+    if (_remindersScheduled) {
+      final wait = 8 - DateTime.now().second;
+      if (wait > 0) await Future.delayed(Duration(seconds: wait));
+      showHere = !await NotificationService().isShowing(notificationId);
+      if (showHere) log('Scheduled alarm did not show at $scheduledTimeStr; showing it from the app');
+    }
+    if (showHere) {
       NotificationService().showNotification(
         id: notificationId,
         title: 'Medicine Reminder',

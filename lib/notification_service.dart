@@ -370,6 +370,20 @@ class NotificationService {
     print('DEBUG: Test notification has been scheduled.');
   }
 
+  /// True if a notification with [id] is on screen right now (Android).
+  Future<bool> isShowing(int id) async {
+    try {
+      final android = flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      if (android == null) return false;
+      final active = await android.getActiveNotifications();
+      return active.any((n) => n.id == id);
+    } catch (e) {
+      print('DEBUG: could not read active notifications: $e');
+      return false;
+    }
+  }
+
   Future<void> cancelNotification({required int id}) async {
     await flutterLocalNotificationsPlugin.cancel(id);
     print('DEBUG: Canceled notification with id: $id');
