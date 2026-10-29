@@ -32,8 +32,10 @@
 #include <SoftwareSerial.h>
 #include <EEPROM.h>
 
-// 1 = DS3231 clock module connected and the "RTClib" library (Adafruit) installed.
-#define USE_DS3231 0
+// 1 = use a DS3231 clock module (needs the "RTClib" library by Adafruit installed).
+// If the module is missing or not wired, the box falls back to its own timer.
+// Set to 0 only if you don't want to install RTClib.
+#define USE_DS3231 1
 
 #if USE_DS3231
 #include <RTClib.h>

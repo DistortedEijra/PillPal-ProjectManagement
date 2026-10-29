@@ -42,7 +42,9 @@ A DS3231 module (with its coin battery) keeps the exact time, even unplugged.
 | SDA | A4 |
 | SCL | A5 |
 
-Then in Arduino IDE: **Sketch → Include Library → Manage Libraries →** search **RTClib** (by Adafruit) → Install (accept its dependencies). In `pillpalbox.ino` change `#define USE_DS3231 0` to `#define USE_DS3231 1`, and upload.
+The DS3231 Mini works too: **+** → 5V, **D** → A4, **C** → A5, **–** → GND (NC not connected).
+
+The sketch uses the DS3231 by default (`#define USE_DS3231 1`), so install the library once: Arduino IDE → **Sketch → Include Library → Manage Libraries →** search **RTClib** (by Adafruit) → Install (accept its dependencies). If the module isn't connected, the box falls back to its own timer. (Set it to `0` only if you don't want to install RTClib.)
 
 ## 2. Upload the sketch
 
