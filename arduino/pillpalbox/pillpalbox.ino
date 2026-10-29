@@ -21,7 +21,7 @@
   Commands from the app (single characters, as before):
     A..F blink slot   a..f steady   0 all off   ! stop blinking   ? status
   Line commands (start with '#', end with newline):
-    #T,YYYY,MM,DD,hh,mm,ss    set the clock (phone's local time)
+    #T,YYYY,MM,DD,hh,mm,ss    set the clock (phone's local time)  [no reply]
     #C                        start a new reminder list
     #S,<slot>,<days>,hh,mm    add a reminder; days = bits Mon=1,Tue=2,...,Sun=64
     #E                        save the list (EEPROM) and use it
@@ -101,6 +101,8 @@ long lastMinuteChecked = -1;
 
 // ---------- connection ----------
 unsigned long lastRxAt = 0;
+unsigned long lastLineAt = 0;              // last time a '#' line character arrived
+const unsigned long LINE_QUIET_MS = 1500;  // ignore single letters this long after line traffic
 bool isConnected = false;
 int lastStateRaw = LOW;
 unsigned long stateChangedAt = 0;
@@ -252,8 +254,9 @@ void setClock(int y, int mo, int d, int h, int mi, int s) {
 #if USE_DS3231
   if (rtcOk) rtc.adjust(DateTime(y, mo, d, h, mi, s));
 #endif
-  // Don't fire again for a minute that was just handled.
-  lastMinuteChecked = (long)(weekSecondsNow() / 60UL);
+  // Re-check the current minute with the new time (a second blink is harmless,
+  // a skipped reminder is not).
+  lastMinuteChecked = -1;
 }
 
 String clockText() {
@@ -306,8 +309,7 @@ void handleLine(const char* s) {
     case 'T':
       if (sscanf(s + 1, ",%d,%d,%d,%d,%d,%d", &y, &mo, &d, &h, &mi, &se) == 6 && mo >= 1 && mo <= 12 &&
           d >= 1 && d <= 31 && h >= 0 && h < 24 && mi >= 0 && mi < 60 && se >= 0 && se < 60) {
-        setClock(y, mo, d, h, mi, se);
-        sendLine("ACK " + clockText());
+        setClock(y, mo, d, h, mi, se);  // no reply: keeps the line quiet while the app sends
       } else {
         sendLine(F("ERR T"));
       }
@@ -316,7 +318,6 @@ void handleLine(const char* s) {
       pendingCount = 0;
       pendingUid[0] = 0;
       pendingName[0] = 0;
-      sendLine(F("ACK CLEAR"));
       break;
     case 'S':
       if (sscanf(s + 1, ",%c,%d,%d,%d", &slot, &days, &h, &mi) == 4) {
@@ -361,7 +362,6 @@ void handleLine(const char* s) {
       pendingUid[comma - uid] = 0;
       strncpy(pendingName, comma + 1, NAME_LEN - 1);
       pendingName[NAME_LEN - 1] = 0;
-      sendLine(F("ACK OWNER"));
       break;
     }
     default:
@@ -471,8 +471,18 @@ void loop() {
   while (hc05.available()) {
     char ch = (char)hc05.read();
     lastRxAt = now;
-    if (feedLine(btLine, ch)) continue;  // '#' lines are always accepted
-    if (!isConnected) continue;          // ignore stray characters when not connected
+    if (feedLine(btLine, ch)) {  // '#' lines are always accepted
+      lastLineAt = now;
+      continue;
+    }
+    if (!isConnected) continue;  // ignore stray characters when not connected
+    // While the app is sending the reminder list, a damaged line can leave
+    // loose letters behind (for example the "b" in an account id). Ignore
+    // single-letter commands for a moment after line traffic.
+    if (now - lastLineAt < LINE_QUIET_MS) continue;
+    // From Bluetooth only the app's commands: A-F blink, 0 all off, ! stop, ? status.
+    // (a-f "steady on" is for the USB Serial Monitor only.)
+    if (ch >= 'a' && ch <= 'f') continue;
     handleChar(ch, now);
   }
 

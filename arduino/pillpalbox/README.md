@@ -85,7 +85,7 @@ That sets the clock to 8:40 PM, saves one reminder (slot A, every day, 8:41 PM) 
 
 Add a schedule 1–2 minutes from now. Keep PillPal open, or tap the reminder when it pops up. The slot's LED blinks for 1 minute, and the box replies `ACK BLINK A`.
 
-Other commands, for testing from a Bluetooth terminal app: `a`–`f` turns a slot on steady, `0` turns all off, `!` stops blinking, and `?` returns the status.
+Other commands: `0` turns all LEDs off, `!` stops blinking, and `?` returns the status. `a`–`f` (steady on) only works from the USB Serial Monitor, not over Bluetooth.
 
 ## Troubleshooting
 
@@ -96,3 +96,4 @@ Other commands, for testing from a Bluetooth terminal app: `a`–`f` turns a slo
 - **Box doesn't light by itself:** open PillPal once near the box so it connects (that sends the time and the list). Type `?` in the Serial Monitor: it should show `CLOCK ...` (not "not set") and `SCHED` more than 0. After a power cut without a DS3231, the clock needs the phone again.
 - **Box lights a few minutes early/late:** the Arduino timer drifts; connect the phone to re-sync, or add a DS3231.
 - **Only medicines with a slot** are saved in the box (max 40 reminder times).
+- **A slot LED stays on and won't stop:** send `0` (or unplug the box for a second; the steady state isn't saved). Update to the latest sketch: older versions could pick up a stray letter while the app was sending the list.

@@ -175,8 +175,9 @@ class PillBoxSync {
   static Future<bool> _send(String line) async {
     final ok = await BluetoothService().sendSignal(line, appendNewline: true);
     if (!ok) log('PillPalBox sync stopped: could not send "$line"');
-    // The box reads Bluetooth with a small buffer; give it time per line.
-    await Future.delayed(const Duration(milliseconds: 60));
+    // The box reads Bluetooth with a small buffer and can't listen while it
+    // replies, so give it time per line.
+    await Future.delayed(const Duration(milliseconds: 120));
     return ok;
   }
 
