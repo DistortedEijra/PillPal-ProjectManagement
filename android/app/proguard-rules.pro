@@ -18,3 +18,11 @@
 
 # Flutter references Play Core (deferred components), which this app does not use
 -dontwarn com.google.android.play.core.**
+
+# flutter_local_notifications saves scheduled reminders with Gson; release
+# builds must keep the generic type info or scheduling fails.
+-keepattributes Signature
+-keepattributes *Annotation*
+-keep class com.google.gson.reflect.TypeToken { *; }
+-keep class * extends com.google.gson.reflect.TypeToken
+-keep class com.google.gson.** { *; }

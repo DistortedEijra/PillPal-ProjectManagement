@@ -317,12 +317,23 @@ class _DashboardPageState extends State<DashboardPage> {
       if (showHere) log('Scheduled alarm did not show at $scheduledTimeStr; showing it from the app');
     }
     if (showHere) {
-      NotificationService().showNotification(
-        id: notificationId,
-        title: 'Medicine Reminder',
-        body: notificationBody,
-        payload: payload,
-      );
+      try {
+        await NotificationService().showNotification(
+          id: notificationId,
+          title: 'Medicine Reminder',
+          body: notificationBody,
+          payload: payload,
+        );
+      } catch (e) {
+        // Don't fail silently: say why, and still ask about the dose.
+        log('Could not show reminder notification: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Reminder notification failed: $e'), duration: const Duration(seconds: 10)),
+          );
+          _showConfirmationDialog(payload);
+        }
+      }
     }
 
     // Start the in-app missed-dose tracking only if the background alarms
