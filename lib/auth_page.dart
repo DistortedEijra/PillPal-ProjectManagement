@@ -54,6 +54,8 @@ class _AuthPageState extends State<AuthPage> {
             _selectedGender == null ||
             emailController.text.isEmpty) {
           result = "Please fill all fields.";
+        } else if (!AuthService.looksLikeEmail(emailController.text)) {
+          result = "Enter a valid email address. We'll send a verification link to it.";
         } else {
           result = await _authService.signUp(
             email: emailController.text.trim(),
@@ -81,6 +83,44 @@ class _AuthPageState extends State<AuthPage> {
       );
     }
     // If successful, the auth wrapper will handle navigation
+  }
+
+  /// "Forgot password?": emails a reset link.
+  Future<void> _forgotPassword() async {
+    final controller = TextEditingController(text: emailController.text.trim());
+    final email = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset password'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("Enter your account's email. We'll send you a link to set a new password."),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.emailAddress,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Email Address', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF116FA9), foregroundColor: Colors.white),
+            child: const Text('Send link'),
+          ),
+        ],
+      ),
+    );
+    if (email == null || !mounted) return;
+    final error = await _authService.sendPasswordReset(email);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(error ?? 'Reset link sent to $email. Check your inbox (and Spam).'),
+    ));
   }
 
   @override
@@ -124,6 +164,14 @@ class _AuthPageState extends State<AuthPage> {
                     _buildTextField(label: "Email Address", controller: emailController, keyboardType: TextInputType.emailAddress),
                     const SizedBox(height: 16),
                     _buildTextField(label: "Password", controller: passwordController, obscureText: true),
+                    if (_authMode == AuthMode.Login)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: _isLoading ? null : _forgotPassword,
+                          child: const Text('Forgot password?'),
+                        ),
+                      ),
                     if (_authMode == AuthMode.SignUp)
                       ...[
                         const SizedBox(height: 16),

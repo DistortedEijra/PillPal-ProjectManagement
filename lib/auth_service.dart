@@ -11,6 +11,24 @@ class AuthService {
   // Stream to listen for auth state changes
   Stream<User?> get authStateChanges => _firebaseAuth.authStateChanges();
 
+  /// Like [authStateChanges], but also fires when the user's email becomes
+  /// verified (after [refreshEmailVerified]), so the app can move on.
+  Stream<User?> get userChanges => _firebaseAuth.userChanges();
+
+  /// Accounts made before this date were created before email verification
+  /// existed, so they can still log in without verifying.
+  static final DateTime verificationRequiredFrom = DateTime.utc(2026, 10, 29);
+
+  /// True if this user must verify their email before using the app.
+  static bool needsEmailVerification(User user) {
+    if (user.emailVerified) return false;
+    final created = user.metadata.creationTime;
+    return created == null || !created.toUtc().isBefore(verificationRequiredFrom);
+  }
+
+  static final RegExp _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]{2,}$');
+  static bool looksLikeEmail(String email) => _emailPattern.hasMatch(email.trim());
+
   // Get current user
   User? get currentUser => _firebaseAuth.currentUser;
 
@@ -39,6 +57,13 @@ class AuthService {
           'email': email,
           'uid': user.uid,
         });
+        // 3. Email a verification link (the app waits on the Verify page).
+        try {
+          await user.updateDisplayName(name);
+          await user.sendEmailVerification().timeout(_timeout);
+        } catch (_) {
+          // Not fatal: the Verify page has a "Resend email" button.
+        }
       }
       return null; // Success
     } on FirebaseAuthException catch (e) {
@@ -66,6 +91,50 @@ class AuthService {
     }
   }
 
+  /// Sends (again) the verification link to the logged-in user.
+  Future<String?> sendVerificationEmail() async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) return 'Please log in again.';
+    try {
+      await user.sendEmailVerification().timeout(_timeout);
+      return null;
+    } on FirebaseAuthException catch (e) {
+      return _friendlyAuthError(e);
+    } on TimeoutException {
+      return 'Sending is taking too long. Check your internet connection and try again.';
+    } catch (e) {
+      return 'Could not send the email: $e';
+    }
+  }
+
+  /// Re-reads the user from Firebase. Returns true once the email is verified.
+  Future<bool> refreshEmailVerified() async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) return false;
+    await user.reload().timeout(_timeout);
+    final fresh = _firebaseAuth.currentUser;
+    final verified = fresh?.emailVerified ?? false;
+    // A new token makes userChanges() fire, so AuthWrapper opens the app.
+    if (verified) await fresh!.getIdToken(true);
+    return verified;
+  }
+
+  /// Emails a password reset link.
+  Future<String?> sendPasswordReset(String email) async {
+    if (!looksLikeEmail(email)) return 'Enter a valid email address.';
+    try {
+      await _firebaseAuth.sendPasswordResetEmail(email: email.trim()).timeout(_timeout);
+      return null;
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'user-not-found') return 'No account uses this email.';
+      return _friendlyAuthError(e);
+    } on TimeoutException {
+      return 'Sending is taking too long. Check your internet connection and try again.';
+    } catch (e) {
+      return 'Could not send the email: $e';
+    }
+  }
+
   // Never let the login button spin forever.
   static const Duration _timeout = Duration(seconds: 20);
 
@@ -84,6 +153,8 @@ class AuthService {
         return 'An account with this email already exists. Try logging in.';
       case 'weak-password':
         return 'Password is too weak (use at least 6 characters).';
+      case 'missing-email':
+        return 'Enter your email address.';
       default:
         return e.message ?? 'Login failed (${e.code}).';
     }
