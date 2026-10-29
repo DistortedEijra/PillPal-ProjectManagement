@@ -26,6 +26,8 @@
     #S,<slot>,<days>,hh,mm    add a reminder; days = bits Mon=1,Tue=2,...,Sun=64
     #E                        save the list (EEPROM) and use it
     #Q                        print the saved reminders and the clock
+    #O,<uid>,<name>           owner of the next list (saved together with #E)
+    #W                        who set up the box -> "OWNER <uid>,<name>" or "OWNER none"
   The same commands can be typed in the Serial Monitor (9600 baud) for testing.
 */
 
@@ -81,6 +83,16 @@ const uint8_t EE_MAGIC = 0x50;  // 'P'
 const uint8_t EE_VERSION = 1;
 const int EE_START = 3;  // [0]=magic [1]=version [2]=count, then 4 bytes per entry
 
+// ---------- owner (the PillPal account that last saved the list) ----------
+const int EE_OWNER = 200;        // [200]='O', then uid (29 bytes) and name (25 bytes)
+const uint8_t EE_OWNER_MAGIC = 'O';
+const uint8_t UID_LEN = 29;      // Firebase uid (28) + end
+const uint8_t NAME_LEN = 25;     // display name (24) + end
+char ownerUid[UID_LEN] = "";
+char ownerName[NAME_LEN] = "";
+char pendingUid[UID_LEN] = "";
+char pendingName[NAME_LEN] = "";
+
 // ---------- clock ----------
 bool clockSet = false;
 unsigned long syncMillis = 0;
@@ -96,7 +108,7 @@ bool stateHigh = false;
 
 // ---------- line input (Bluetooth and USB) ----------
 struct LineReader {
-  char buf[40];
+  char buf[64];  // long enough for "#O,<uid>,<name>"
   uint8_t len;
   bool active;
 };
@@ -106,6 +118,12 @@ LineReader usbLine = {{0}, 0, false};
 // =====================================================================
 
 void sendLine(const String& s) {
+  Serial.println(s);
+  hc05.println(s);
+}
+
+// Fixed texts stay in flash (F("...")) to save the Uno's small RAM.
+void sendLine(const __FlashStringHelper* s) {
   Serial.println(s);
   hc05.println(s);
 }
@@ -159,6 +177,30 @@ void saveSchedule() {
     EEPROM.update(a + 1, entries[i].days);
     EEPROM.update(a + 2, entries[i].hour);
     EEPROM.update(a + 3, entries[i].minute);
+  }
+}
+
+void saveOwner() {
+  EEPROM.update(EE_OWNER, EE_OWNER_MAGIC);
+  for (uint8_t i = 0; i < UID_LEN; i++) EEPROM.update(EE_OWNER + 1 + i, ownerUid[i]);
+  for (uint8_t i = 0; i < NAME_LEN; i++) EEPROM.update(EE_OWNER + 1 + UID_LEN + i, ownerName[i]);
+}
+
+void loadOwner() {
+  ownerUid[0] = 0;
+  ownerName[0] = 0;
+  if (EEPROM.read(EE_OWNER) != EE_OWNER_MAGIC) return;
+  for (uint8_t i = 0; i < UID_LEN; i++) ownerUid[i] = EEPROM.read(EE_OWNER + 1 + i);
+  for (uint8_t i = 0; i < NAME_LEN; i++) ownerName[i] = EEPROM.read(EE_OWNER + 1 + UID_LEN + i);
+  ownerUid[UID_LEN - 1] = 0;
+  ownerName[NAME_LEN - 1] = 0;
+}
+
+void sendOwner() {
+  if (ownerUid[0] == 0) {
+    sendLine(F("OWNER none"));
+  } else {
+    sendLine(String("OWNER ") + ownerUid + "," + ownerName);
   }
 }
 
@@ -267,12 +309,14 @@ void handleLine(const char* s) {
         setClock(y, mo, d, h, mi, se);
         sendLine("ACK " + clockText());
       } else {
-        sendLine("ERR T");
+        sendLine(F("ERR T"));
       }
       break;
     case 'C':
       pendingCount = 0;
-      sendLine("ACK CLEAR");
+      pendingUid[0] = 0;
+      pendingName[0] = 0;
+      sendLine(F("ACK CLEAR"));
       break;
     case 'S':
       if (sscanf(s + 1, ",%c,%d,%d,%d", &slot, &days, &h, &mi) == 4) {
@@ -283,19 +327,45 @@ void handleLine(const char* s) {
           break;
         }
       }
-      sendLine("ERR S");
+      sendLine(F("ERR S"));
       break;
     case 'E':
       for (uint8_t i = 0; i < pendingCount; i++) entries[i] = pending[i];
       entryCount = pendingCount;
       saveSchedule();
+      if (pendingUid[0] != 0) {
+        strncpy(ownerUid, pendingUid, UID_LEN);
+        strncpy(ownerName, pendingName, NAME_LEN);
+        ownerUid[UID_LEN - 1] = 0;
+        ownerName[NAME_LEN - 1] = 0;
+        saveOwner();
+      }
       sendLine(String("ACK SCHED ") + entryCount);
       break;
     case 'Q':
       printSchedule();
+      sendOwner();
       break;
+    case 'W':
+      sendOwner();
+      break;
+    case 'O': {
+      // "#O,<uid>,<name>": the name is everything after the second comma.
+      const char* uid = s + 2;
+      const char* comma = (s[1] == ',') ? strchr(uid, ',') : nullptr;
+      if (comma == nullptr || comma == uid || comma - uid >= UID_LEN) {
+        sendLine(F("ERR O"));
+        break;
+      }
+      memcpy(pendingUid, uid, comma - uid);
+      pendingUid[comma - uid] = 0;
+      strncpy(pendingName, comma + 1, NAME_LEN - 1);
+      pendingName[NAME_LEN - 1] = 0;
+      sendLine(F("ACK OWNER"));
+      break;
+    }
     default:
-      sendLine("ERR ?");
+      sendLine(F("ERR ?"));
   }
 }
 
@@ -314,10 +384,10 @@ void handleChar(char ch, unsigned long now) {
     sendLine("ACK STEADY " + String((char)toupper(ch)));
   } else if (ch == '0') {
     setAllOff();
-    sendLine("ACK ALLOFF");
+    sendLine(F("ACK ALLOFF"));
   } else if (ch == '!') {
     stopAllBlink();
-    sendLine("ACK STOP");
+    sendLine(F("ACK STOP"));
   } else if (ch == '?') {
     String s = "STATUS ";
     for (int i = 0; i < 6; i++) s += slots[i].blinking ? (char)('A' + i) : '-';
@@ -326,6 +396,7 @@ void handleChar(char ch, unsigned long now) {
     sendLine(s);
     sendLine(clockText());
     sendLine(String("SCHED ") + entryCount);
+    sendOwner();
   }
 }
 
@@ -376,8 +447,10 @@ void setup() {
 #endif
 
   loadSchedule();
+  loadOwner();
   lastRxAt = millis();
   sendLine(String("READY PillPalBox v3, ") + entryCount + " reminders saved");
+  sendOwner();
   sendLine(clockText());
 }
 

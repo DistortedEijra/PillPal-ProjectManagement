@@ -75,6 +75,15 @@ class _DashboardPageState extends State<DashboardPage> {
       await _runEscalationCheck();
     });
 
+    PillBoxSync.confirmReplace = _confirmReplaceBox;
+    PillBoxSync.onKeptOtherList = (ownerName) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text("Kept ${ownerName.isEmpty ? 'the other' : "$ownerName's"} medicines in the PillPalBox. "
+            'Your reminders still work on this phone.'),
+      ));
+    };
+
     _connectionSubscription = BluetoothService().isConnectedStream.listen((isConnected) {
       if (mounted) {
         setState(() {
@@ -82,7 +91,11 @@ class _DashboardPageState extends State<DashboardPage> {
         });
       }
       // Each time the box connects: set its clock and send the reminder list.
-      if (isConnected) _syncPillBox();
+      if (isConnected) {
+        _syncPillBox();
+      } else {
+        PillBoxSync.resetConnection(); // ask again next time it connects
+      }
     });
 
     _dataSubscription = BluetoothService().dataStream.listen((data) {
@@ -437,7 +450,39 @@ class _DashboardPageState extends State<DashboardPage> {
 
   void _syncPillBox() {
     if (!_schedulesLoaded || !_slotsLoaded) return;
-    unawaited(PillBoxSync.sync(allMedicines, pillBoxAssignments));
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final name = (givenName?.isNotEmpty == true)
+        ? givenName!
+        : (user.displayName?.isNotEmpty == true ? user.displayName! : (user.email ?? 'PillPal user'));
+    unawaited(PillBoxSync.sync(allMedicines, pillBoxAssignments, userUid: user.uid, userName: name));
+  }
+
+  /// Another account's medicines are in the box: ask before replacing them.
+  Future<bool> _confirmReplaceBox(String ownerName) async {
+    if (!mounted) return false;
+    final who = ownerName.isEmpty ? 'another account' : ownerName;
+    final replace = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Use this PillPalBox?'),
+        content: Text(
+          'This PillPalBox has medicines set up by $who.\n\n'
+          'If you continue, their list in the box is replaced with your medicines, '
+          'and the box will show you as its user.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text("Keep $who's")),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF116FA9), foregroundColor: Colors.white),
+            child: const Text('Replace with mine'),
+          ),
+        ],
+      ),
+    );
+    return replace == true;
   }
 
   /// If a reminder fired while the app was closed and the dose isn't logged
@@ -1372,6 +1417,33 @@ class _DashboardPageState extends State<DashboardPage> {
                           onPressed: _showBluetoothDialog,
                         ),
                       ],
+                    ),
+                    // Who last put their medicine list in the box.
+                    ValueListenableBuilder<PillBoxOwner?>(
+                      valueListenable: PillBoxSync.boxOwner,
+                      builder: (context, owner, _) {
+                        if (!isPillBoxConnected || owner == null) return const SizedBox.shrink();
+                        final me = FirebaseAuth.instance.currentUser?.uid;
+                        final text = owner.uid.isEmpty
+                            ? 'No medicines saved in the box yet'
+                            : owner.uid == me
+                                ? 'Medicines in the box: yours (${owner.name})'
+                                : 'Medicines in the box: set up by ${owner.name}';
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Row(
+                            children: [
+                              Icon(
+                                owner.uid.isNotEmpty && owner.uid != me ? Icons.person_outline : Icons.check_circle_outline,
+                                size: 16,
+                                color: owner.uid.isNotEmpty && owner.uid != me ? Colors.orange : Colors.green,
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
+                            ],
+                          ),
+                        );
+                      },
                     ),
                     const SizedBox(height: 16),
                     const Text('Assign Medicine', style: TextStyle(fontWeight: FontWeight.bold)),

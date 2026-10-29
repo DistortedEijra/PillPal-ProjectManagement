@@ -55,4 +55,32 @@ void main() {
     );
     expect(entries.length, kPillBoxMaxEntries);
   });
+
+  group('box owner', () {
+    test('owner line is sent before the list is saved', () {
+      final lines = pillBoxSyncLines(
+        [const PillBoxEntry('A', 1, 8, 0)],
+        DateTime(2026, 10, 29, 23, 40, 0),
+        ownerUid: 'abc123',
+        ownerName: 'Rosa Santos',
+      );
+      expect(lines, ['#T,2026,10,29,23,40,0', '#C', '#O,abc123,Rosa Santos', '#S,A,1,08,00', '#E']);
+    });
+
+    test('names are made safe for the box', () {
+      expect(pillBoxSafeName('Rosa, Santos'), 'Rosa  Santos');
+      expect(pillBoxSafeName('Ñoño 💊'), 'oo');
+      expect(pillBoxSafeName('   '), 'PillPal user');
+      expect(pillBoxSafeName('A very very long name that does not fit').length, lessThanOrEqualTo(24));
+    });
+
+    test('reading the box answer', () {
+      final none = parsePillBoxOwner('OWNER none')!;
+      expect(none.uid, '');
+      final rosa = parsePillBoxOwner('OWNER abc123,Rosa Santos\r')!;
+      expect(rosa.uid, 'abc123');
+      expect(rosa.name, 'Rosa Santos');
+      expect(parsePillBoxOwner('ACK BLINK A'), isNull);
+    });
+  });
 }
