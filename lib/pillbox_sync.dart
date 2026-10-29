@@ -46,8 +46,10 @@ int dayMaskFor(Iterable<String> days) {
 /// box saves. Same slot + same time on different days are merged.
 List<PillBoxEntry> planPillBoxEntries(
   List<Map<String, dynamic>> medicines,
-  List<Map<String, String>> assignments,
-) {
+  List<Map<String, String>> assignments, {
+  DateTime? now,
+}) {
+  final from = now ?? DateTime.now();
   final slotByName = <String, String>{};
   for (final a in assignments) {
     final name = (a['medicine'] ?? '').trim().toLowerCase();
@@ -60,9 +62,17 @@ List<PillBoxEntry> planPillBoxEntries(
     if (med['isActive'] == false) continue;
     final slot = slotByName[(med['name'] ?? '').toString().trim().toLowerCase()];
     if (slot == null) continue;
-    final mask = dayMaskFor(((med['repeatDays'] as List?) ?? []).cast<String>());
-    if (mask == 0) continue;
+    final endDate = med['endDate'] as String?;
+    final days = ((med['repeatDays'] as List?) ?? []).cast<String>();
     for (final t in ((med['schedules'] as List?) ?? []).cast<TimeOfDay>()) {
+      // Limited course: only the days whose next dose is still within it.
+      // (The app re-sends the list whenever it connects, so the box forgets
+      // a finished course then.)
+      final mask = dayMaskFor(days.where((d) {
+        final weekday = kDaysOfWeek.indexOf(d) + 1;
+        return weekday > 0 && runsOn(endDate, nextWeeklyAt(weekday, t.hour, t.minute, from: from));
+      }));
+      if (mask == 0) continue;
       final key = '$slot|${t.hour}|${t.minute}';
       masks[key] = (masks[key] ?? 0) | mask;
     }

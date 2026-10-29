@@ -59,6 +59,8 @@ Rules:
   once a day = 08:00 (21:00 if at bedtime or at night); twice a day or BID = 08:00 and 20:00;
   three times a day or TID = 08:00, 14:00, 20:00; four times a day or QID = 08:00, 12:00, 16:00, 20:00;
   every N hours = start at 08:00 and add N hours until the day is full; as needed (PRN) = no times.
+- days: how many days to take it, only if written ("x 7 days" = 7, "for 2 weeks" = 14,
+  "for 1 month" = 30). Leave it out for maintenance medicines with no end.
 - Ignore the patient's name, the doctor's name, clinic details, and license numbers.
 - If the image is not a prescription or medicine label, return an empty medicines list.
 ''';
@@ -77,10 +79,12 @@ Rules:
           'times': Schema.array(
               items: Schema.string(), description: 'Dose times in 24-hour HH:mm.'),
           'weekly': Schema.boolean(description: 'True only if taken once a week.'),
+          'days': Schema.integer(
+              description: 'How many days to take it, only if written (for example 7 for "x 7 days").'),
           'directions': Schema.string(
               description: 'The directions as written, for example "1 cap 3x a day x 7 days".'),
         },
-        optionalProperties: ['strength', 'amount', 'directions'],
+        optionalProperties: ['strength', 'amount', 'directions', 'days'],
       ),
     ),
   });
@@ -347,6 +351,10 @@ Rules:
       }
       times.sort((a, b) => (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute));
       final found = times.isNotEmpty;
+      final aiDays = (m['days'] as num?)?.toInt();
+      final courseDays = (aiDays != null && aiDays > 0 && aiDays <= 365)
+          ? aiDays
+          : PrescriptionParser.durationDaysIn(_str(m['directions']) ?? '');
 
       results.add(ScanResult(
         rawText: _str(m['directions']) ?? name,
@@ -355,6 +363,8 @@ Rules:
         times: found ? times : [const TimeOfDay(hour: 8, minute: 0)],
         days: m['weekly'] == true ? ['Mon'] : List.of(kDaysOfWeek),
         foundFrequency: found,
+        durationDays: courseDays,
+        note: courseDays == null ? null : 'Take for $courseDays day${courseDays == 1 ? '' : 's'}.',
       ));
     }
 
@@ -395,6 +405,9 @@ class ScanResult {
   /// Extra hint for the user, e.g. "Take for 7 days." or "As needed".
   final String? note;
 
+  /// How many days to take it ("for 7 days" = 7), null when no end is written.
+  final int? durationDays;
+
   const ScanResult({
     required this.rawText,
     required this.name,
@@ -404,6 +417,7 @@ class ScanResult {
     required this.foundFrequency,
     this.foundDays = false,
     this.note,
+    this.durationDays,
   });
 
   bool get isEmpty => name == null && dosage == null && !foundFrequency;
@@ -565,6 +579,7 @@ class PrescriptionParser {
         foundFrequency: r.foundFrequency,
         foundDays: r.foundDays,
         note: r.note,
+        durationDays: r.durationDays,
       ));
     }
     return results;
@@ -608,7 +623,18 @@ class PrescriptionParser {
       foundFrequency: foundFrequency,
       foundDays: days.found,
       note: notes.isEmpty ? null : notes.join(' '),
+      durationDays: durationDaysIn(lower),
     );
+  }
+
+  /// "for 7 days" -> 7, "x 2 weeks" -> 14, "for 1 month" -> 30, else null.
+  static int? durationDaysIn(String text) {
+    final m = _duration.firstMatch(text.toLowerCase());
+    if (m == null) return null;
+    final n = int.parse(m.group(1)!);
+    final unit = _durationUnit(m.group(2)!, '2');
+    final days = unit == 'days' ? n : unit == 'weeks' ? n * 7 : n * 30;
+    return (days > 0 && days <= 365) ? days : null;
   }
 
   static String _durationUnit(String unit, String n) {

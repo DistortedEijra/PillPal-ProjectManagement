@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'medicine_editor.dart';
 import 'scan_to_schedule.dart';
 import 'time_utils.dart';
 
@@ -11,6 +12,7 @@ class ScannedMedicineDraft {
   String dosage;
   List<TimeOfDay> times;
   List<String> days;
+  String? endDate; // last day ('yyyy-MM-dd'), null = ongoing
   bool selected;
   bool timesGuessed; // no time/frequency was written; we used 8:00 AM
   final bool alreadyScheduled;
@@ -20,6 +22,7 @@ class ScannedMedicineDraft {
     required this.dosage,
     required this.times,
     required this.days,
+    this.endDate,
     required this.selected,
     required this.timesGuessed,
     required this.alreadyScheduled,
@@ -35,6 +38,7 @@ class ScannedMedicineDraft {
       dosage: (r.dosage ?? '').trim(),
       times: List.of(r.times),
       days: List.of(r.days),
+      endDate: r.durationDays == null ? null : endDateForDays(r.durationDays!),
       selected: !dup, // don't add a second copy by default
       timesGuessed: !r.foundFrequency,
       alreadyScheduled: dup,
@@ -125,6 +129,8 @@ class _ScanReviewDialogState extends State<_ScanReviewDialog> {
                   final d = drafts[i];
                   final notes = <Widget>[
                     Text('${d.timesText} • ${d.daysText}', style: const TextStyle(fontSize: 13)),
+                    if (d.endDate != null)
+                      Text(courseText(d.endDate), style: const TextStyle(fontSize: 12, color: _brand)),
                     if (d.timesGuessed)
                       const Text('No time written — set to 8:00 AM. Please check.',
                           style: TextStyle(fontSize: 12, color: Colors.orange)),
@@ -202,6 +208,7 @@ class _EditDraftDialogState extends State<_EditDraftDialog> {
   late final TextEditingController _dosage = TextEditingController(text: widget.draft.dosage);
   late List<TimeOfDay> _times = List.of(widget.draft.times);
   late List<String> _days = List.of(widget.draft.days);
+  late String? _endDate = widget.draft.endDate;
   String? _error;
 
   @override
@@ -237,6 +244,7 @@ class _EditDraftDialogState extends State<_EditDraftDialog> {
     d.dosage = _dosage.text.trim();
     d.times = _times;
     d.days = _days;
+    d.endDate = _endDate;
     d.timesGuessed = false; // the user has checked them
     d.selected = true;
     Navigator.pop(context, true);
@@ -299,6 +307,9 @@ class _EditDraftDialogState extends State<_EditDraftDialog> {
                       ))
                   .toList(),
             ),
+            const SizedBox(height: 12),
+            const Text('How long', style: TextStyle(fontWeight: FontWeight.bold)),
+            CourseLengthPicker(endDate: _endDate, onChanged: (v) => setState(() => _endDate = v)),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),

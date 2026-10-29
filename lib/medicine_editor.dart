@@ -12,12 +12,14 @@ class MedicineEdit {
   final String dosage;
   final List<TimeOfDay> times;
   final List<String> days;
+  final String? endDate; // last day ('yyyy-MM-dd'), null = ongoing
 
   const MedicineEdit({
     required this.name,
     required this.dosage,
     required this.times,
     required this.days,
+    this.endDate,
   });
 
   /// From a schedule document (Firestore data: times as {hour, minute}).
@@ -28,6 +30,7 @@ class MedicineEdit {
             .map((t) => TimeOfDay(hour: (t['hour'] as num).toInt(), minute: (t['minute'] as num).toInt()))
             .toList(),
         days: ((d['repeatDays'] as List?) ?? []).cast<String>(),
+        endDate: d['endDate'] as String?,
       );
 
   /// From the dashboard's local list (times already TimeOfDay).
@@ -36,6 +39,7 @@ class MedicineEdit {
         dosage: (m['dosage'] ?? '').toString(),
         times: List<TimeOfDay>.of((m['schedules'] as List).cast<TimeOfDay>()),
         days: List<String>.of((m['repeatDays'] as List).cast<String>()),
+        endDate: m['endDate'] as String?,
       );
 
   String get timesText => times.map(formatTime12h).join(', ');
@@ -70,6 +74,8 @@ class ScheduleEdits {
       'dosage': edit.dosage.trim(),
       'schedules': edit.times.map((t) => {'hour': t.hour, 'minute': t.minute}).toList(),
       'repeatDays': sortDays(edit.days),
+      // Ongoing = no endDate field at all.
+      'endDate': edit.endDate ?? FieldValue.delete(),
       'updatedAt': FieldValue.serverTimestamp(),
       'updatedBy': me?.uid,
       'updatedByName': editorName,
@@ -108,6 +114,7 @@ class _MedicineEditorDialogState extends State<_MedicineEditorDialog> {
   late final TextEditingController _dosage = TextEditingController(text: widget.initial.dosage);
   late final List<TimeOfDay> _times = _sortTimes(List.of(widget.initial.times));
   late final Set<String> _days = widget.initial.days.toSet();
+  late String? _endDate = widget.initial.endDate;
   String? _error;
 
   @override
@@ -150,6 +157,7 @@ class _MedicineEditorDialogState extends State<_MedicineEditorDialog> {
         dosage: _dosage.text.trim(),
         times: List.of(_times),
         days: sortDays(_days),
+        endDate: _endDate,
       ),
     );
   }
@@ -231,6 +239,10 @@ class _MedicineEditorDialogState extends State<_MedicineEditorDialog> {
                       ))
                   .toList(),
             ),
+            const SizedBox(height: 14),
+            const Text('How long', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            CourseLengthPicker(endDate: _endDate, onChanged: (v) => setState(() => _endDate = v)),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 10),
@@ -246,6 +258,74 @@ class _MedicineEditorDialogState extends State<_MedicineEditorDialog> {
           style: ElevatedButton.styleFrom(backgroundColor: _brand, foregroundColor: Colors.white),
           child: const Text('Save changes'),
         ),
+      ],
+    );
+  }
+}
+
+/// "How long" chips: Ongoing, 3 days, 5 days, 1 week, 2 weeks, 1 month, or a
+/// picked last day. Gives back the last day as 'yyyy-MM-dd' (null = ongoing).
+/// Counting starts today.
+class CourseLengthPicker extends StatelessWidget {
+  final String? endDate;
+  final ValueChanged<String?> onChanged;
+  const CourseLengthPicker({super.key, required this.endDate, required this.onChanged});
+
+  static const _choices = <String, int>{'3 days': 3, '5 days': 5, '1 week': 7, '2 weeks': 14, '1 month': 30};
+
+  Future<void> _pickDate(BuildContext context) async {
+    final today = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      helpText: 'Last day to take it',
+      initialDate: parseDateKey(endDate) ?? today.add(const Duration(days: 6)),
+      firstDate: DateTime(today.year, today.month, today.day),
+      lastDate: today.add(const Duration(days: 730)),
+    );
+    if (picked != null) onChanged(dateKey(picked));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final presetMatch = _choices.entries.where((c) => endDateForDays(c.value) == endDate);
+    final selected = endDate == null ? 'Ongoing' : (presetMatch.isEmpty ? null : presetMatch.first.key);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            ChoiceChip(
+              label: const Text('Ongoing'),
+              selected: selected == 'Ongoing',
+              selectedColor: _brand.withOpacity(0.2),
+              onSelected: (_) => onChanged(null),
+            ),
+            for (final c in _choices.entries)
+              ChoiceChip(
+                label: Text(c.key),
+                selected: selected == c.key,
+                selectedColor: _brand.withOpacity(0.2),
+                onSelected: (_) => onChanged(endDateForDays(c.value)),
+              ),
+            ChoiceChip(
+              avatar: const Icon(Icons.event, size: 16),
+              label: const Text('Pick last day'),
+              selected: endDate != null && selected == null,
+              selectedColor: _brand.withOpacity(0.2),
+              onSelected: (_) => _pickDate(context),
+            ),
+          ],
+        ),
+        if (endDate != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              '${courseText(endDate)}. Reminders stop after this day.',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ),
       ],
     );
   }

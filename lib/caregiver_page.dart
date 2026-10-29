@@ -366,6 +366,7 @@ class PatientMonitorPage extends StatelessWidget {
     for (final s in schedules) {
       final days = ((s['repeatDays'] as List?) ?? []).cast<String>();
       if (!days.contains(today)) continue;
+      if (!runsOn(s['endDate'] as String?, now)) continue; // course finished
       for (final t in (s['schedules'] as List? ?? [])) {
         final tod = TimeOfDay(hour: t['hour'] as int, minute: t['minute'] as int);
         final timeText = formatTime12h(tod);
@@ -443,7 +444,8 @@ class PatientMonitorPage extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.medication, color: _brand),
                 title: Text('${m.name}  •  ${m.dosage}'),
-                subtitle: Text('${m.timesText}\n${m.daysText}'),
+                subtitle: Text('${m.timesText}\n${m.daysText}'
+                    '${m.endDate != null ? '\n${courseText(m.endDate)}' : ''}'),
                 isThreeLine: true,
                 trailing: IconButton(
                   tooltip: 'Edit',

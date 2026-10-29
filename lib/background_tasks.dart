@@ -96,23 +96,28 @@ Future<void> missedDoseCheckCallback(int id, Map<String, dynamic> params) async 
     if (!await _prepareBackground()) return; // logged out: stop re-arming
     final now = DateTime.now();
     final due = now.subtract(EscalationService.missedAfter);
-    await EscalationService().handleDueCheck(
-      date: dateKey(due),
-      time: (params['time'] ?? '') as String,
-      meds: _medsFromParams(params),
-      now: now,
-    );
+    final allMeds = _medsFromParams(params);
+    // Medicines whose course ("for 7 days") is over are not checked any more.
+    final meds = allMeds.where((m) => runsOn(m['endDate'], due)).toList();
+    if (meds.isNotEmpty) {
+      await EscalationService().handleDueCheck(
+        date: dateKey(due),
+        time: (params['time'] ?? '') as String,
+        meds: meds,
+        now: now,
+      );
+    }
 
-    // Re-arm for the same day and time next week.
+    // Re-arm for the same day and time next week, if a medicine still runs then.
     final weekday = (params['weekday'] as num?)?.toInt();
     final hour = (params['hour'] as num?)?.toInt();
     final minute = (params['minute'] as num?)?.toInt();
     if (weekday != null && hour != null && minute != null) {
-      await BackgroundTasks.scheduleDueCheck(
-        id: id,
-        at: nextWeeklyAt(weekday, hour, minute, from: now.add(const Duration(minutes: 1))),
-        params: params,
-      );
+      final next = nextWeeklyAt(weekday, hour, minute, from: now.add(const Duration(minutes: 1)));
+      final nextDue = next.subtract(EscalationService.missedAfter);
+      if (allMeds.any((m) => runsOn(m['endDate'], nextDue))) {
+        await BackgroundTasks.scheduleDueCheck(id: id, at: next, params: params);
+      }
     }
   } catch (e) {
     debugPrint('PillPal background check failed: $e');

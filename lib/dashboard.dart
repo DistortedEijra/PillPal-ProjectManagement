@@ -149,6 +149,7 @@ class _DashboardPageState extends State<DashboardPage> {
     List<Map<String, dynamic>> dueMedicines = [];
 
     for (final med in medicines) {
+      if (!runsOn(med['endDate'] as String?, now)) continue; // course finished
       final List<String> repeatDays = (med['repeatDays'] as List).cast<String>();
       final List<TimeOfDay> schedules = (med['schedules'] as List).cast<TimeOfDay>();
 
@@ -528,6 +529,7 @@ class _DashboardPageState extends State<DashboardPage> {
       String? payloadTime;
       for (final med in medicines) {
         if (!(med['repeatDays'] as List).contains(today)) continue;
+        if (!runsOn(med['endDate'] as String?, now)) continue;
         for (final t in (med['schedules'] as List).cast<TimeOfDay>()) {
           final due = DateTime(now.year, now.month, now.day, t.hour, t.minute);
           if (due.isAfter(now) || !due.isAfter(now.subtract(EscalationService.missedAfter))) continue;
@@ -576,6 +578,7 @@ class _DashboardPageState extends State<DashboardPage> {
       'repeatDays': ((data['repeatDays'] as List<dynamic>?) ?? []).cast<String>(),
       'createdAt': createdAt,
       'isActive': data['isActive'] ?? true,
+      'endDate': data['endDate'] as String?, // last day of a limited course
     };
   }
 
@@ -704,6 +707,7 @@ class _DashboardPageState extends State<DashboardPage> {
             'dosage': edit.dosage,
             'schedules': edit.times,
             'repeatDays': edit.days,
+            'endDate': edit.endDate,
           };
         }
         medicines = allMedicines.where((m) => m['isActive'] == true).toList();
@@ -787,6 +791,7 @@ class _DashboardPageState extends State<DashboardPage> {
         'dosage': dosage,
         'schedules': d.times.map((t) => {'hour': t.hour, 'minute': t.minute}).toList(),
         'repeatDays': d.days,
+        if (d.endDate != null) 'endDate': d.endDate,
         'createdAt': FieldValue.serverTimestamp(),
         'isActive': true,
       });
@@ -796,6 +801,7 @@ class _DashboardPageState extends State<DashboardPage> {
         'dosage': dosage,
         'schedules': List<TimeOfDay>.of(d.times),
         'repeatDays': List<String>.of(d.days),
+        'endDate': d.endDate,
         'createdAt': DateTime.now(),
         'isActive': true,
       });
@@ -816,6 +822,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final dosageController = TextEditingController();
     List<String> selectedDays = [];
     List<TimeOfDay> schedules = [const TimeOfDay(hour: 12, minute: 0)];
+    String? endDate; // last day of a limited course, null = ongoing
     List<String> availableMedicines =
     pillBoxAssignments.map((e) => e['medicine'] ?? '').where((m) => m.trim().isNotEmpty).toList();
     bool isScanning = false;
@@ -891,6 +898,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 if (result.dosage != null) dosageController.text = result.dosage!;
                 if (result.foundFrequency) schedules = List.of(result.times);
                 selectedDays = List.of(result.days);
+                if (result.durationDays != null) endDate = endDateForDays(result.durationDays!);
                 scanNote = result.summary;
               });
             } catch (e) {
@@ -1047,6 +1055,10 @@ class _DashboardPageState extends State<DashboardPage> {
                     onPressed: () => setStateDialog(() => schedules.add(const TimeOfDay(hour: 12, minute: 0))),
                     child: const Text('Add Time'),
                   ),
+                  const SizedBox(height: 8),
+                  const Text('How long:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  CourseLengthPicker(endDate: endDate, onChanged: (v) => setStateDialog(() => endDate = v)),
                 ],
               ),
             ),
@@ -1082,6 +1094,7 @@ class _DashboardPageState extends State<DashboardPage> {
                         'dosage': dosageController.text,
                         'schedules': validSchedules,
                         'repeatDays': selectedDays,
+                        if (endDate != null) 'endDate': endDate,
                         'createdAt': FieldValue.serverTimestamp(),
                         'isActive': true,
                       });
@@ -1092,6 +1105,7 @@ class _DashboardPageState extends State<DashboardPage> {
                         'dosage': dosageController.text,
                         'schedules': schedules, // Keep as TimeOfDay for local state
                         'repeatDays': selectedDays,
+                        'endDate': endDate,
                         'createdAt': DateTime.now(),
                         'isActive': true,
                       };
@@ -1903,15 +1917,19 @@ class _DashboardPageState extends State<DashboardPage> {
                         nextSchedule = earliestSchedule.format(context);
                       }
                       final repeatDaysStr = (med['repeatDays'] as List).join(', ');
+                      final String? endDate = med['endDate'] as String?;
+                      final bool ended = !runsOn(endDate, DateTime.now());
                       return Card(
                         margin: const EdgeInsets.symmetric(vertical: 8),
+                        color: ended ? Colors.grey[200] : null,
                         child: ListTile(
                           isThreeLine: true,
                           onTap: () => _editMedicine(med),
                           onLongPress: () => _showDeleteConfirmationDialog(med),
-                          title: Text(med['name']),
+                          title: Text(med['name'], style: TextStyle(color: ended ? Colors.black45 : null)),
                           subtitle: Text(
-                            'Next intake: $nextSchedule\nDosage: ${med['dosage']}\nRepeat: $repeatDaysStr',
+                            'Next intake: ${ended ? 'none (finished)' : nextSchedule}\nDosage: ${med['dosage']}\nRepeat: $repeatDaysStr'
+                            '${endDate != null ? '\n${courseText(endDate)}' : ''}',
                           ),
                           trailing: IconButton(
                             tooltip: 'Edit',
@@ -2005,7 +2023,7 @@ class _DashboardPageState extends State<DashboardPage> {
       final weekdayStr = daysOfWeek[d.weekday - 1];
       List<Map<String, dynamic>> expectedIntakes = [];
       for (var med in allMedicines) {
-        if ((med['repeatDays'] as List).contains(weekdayStr)) {
+        if ((med['repeatDays'] as List).contains(weekdayStr) && runsOn(med['endDate'] as String?, d)) {
           for (var sch in med['schedules'] as List<TimeOfDay>) {
             final timeStr = formatTime(sch);
             expectedIntakes.add({'medicine': med['name'], 'time': timeStr, 'status': 'not_taken'});
@@ -2070,7 +2088,9 @@ class _DashboardPageState extends State<DashboardPage> {
           final bool isActiveByDay = createdAt == null
               ? false
               : DateTime(day.year, day.month, day.day).isAfter(DateTime(createdAt.year, createdAt.month, createdAt.day).subtract(const Duration(days: 1)));
-          if (isActiveByDay && (med['repeatDays'] as List).contains(weekdayStr)) {
+          if (isActiveByDay &&
+              runsOn(med['endDate'] as String?, day) &&
+              (med['repeatDays'] as List).contains(weekdayStr)) {
             // Count only schedules that have already occurred for 'day'
             final List<TimeOfDay> scheds = (med['schedules'] as List).cast<TimeOfDay>();
             if (day.isBefore(DateTime(now.year, now.month, now.day))) {

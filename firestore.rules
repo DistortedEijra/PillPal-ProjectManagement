@@ -48,7 +48,7 @@ service cloud.firestore {
       match /schedules/{scheduleId} {
         allow update: if isCaregiverOf(uid) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'name', 'dosage', 'schedules', 'repeatDays',
+            'name', 'dosage', 'schedules', 'repeatDays', 'endDate',
             'updatedAt', 'updatedBy', 'updatedByName', 'renamedFrom'
           ]) &&
           request.resource.data.updatedBy == request.auth.uid;

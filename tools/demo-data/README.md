@@ -8,7 +8,7 @@ Deletes **every account and all data** in the Firebase project, then creates two
 | Caregiver (Ana Santos, daughter) | `caregiver@pillpal.test` | `PillPal123` |
 
 Sample data on the patient:
-- **Medicines:** Losartan 8 AM (slot A), Metformin 8 AM + 8 PM (B), Atorvastatin 9 PM (C), Vitamin D3 Mon/Wed/Fri 9 AM (D)
+- **Medicines:** Losartan 8 AM (slot A), Metformin 8 AM + 8 PM (B), Atorvastatin 9 PM (C), Vitamin D3 Mon/Wed/Fri 9 AM (D), and Amoxicillin 8 AM + 2 PM + 8 PM (E) as a 7-day course that ends in a few days
 - **History:** last 7 days, mostly taken, 3 missed (with caregiver alerts)
 - **Reminders chat:** 3 messages from Ana, two marked Done
 

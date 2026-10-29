@@ -18,6 +18,10 @@ class PlannedReminder {
   final String payload;
   final List<Map<String, String>> meds;
 
+  /// Set when every medicine in this reminder finishes its course before the
+  /// same day next week: ring once at this moment instead of weekly.
+  final DateTime? onceAt;
+
   const PlannedReminder({
     required this.id,
     required this.weekday,
@@ -26,6 +30,7 @@ class PlannedReminder {
     required this.body,
     required this.payload,
     this.meds = const [],
+    this.onceAt,
   });
 
   String get key => '$weekday|${time.hour}|${time.minute}';
@@ -44,13 +49,18 @@ List<PlannedReminder> soonestFirst(List<PlannedReminder> plan, DateTime now) {
 
 /// Builds the list of weekly reminder alarms from the user's active schedules.
 /// [medicines] use the dashboard format: name, dosage, schedules (TimeOfDay),
-/// repeatDays ('Mon'..'Sun'), isActive.
+/// repeatDays ('Mon'..'Sun'), isActive, and optional endDate ('yyyy-MM-dd',
+/// the last day of a limited course).
 List<PlannedReminder> planWeeklyReminders(
   List<Map<String, dynamic>> medicines,
-  List<Map<String, String>> pillBoxAssignments,
-) {
+  List<Map<String, String>> pillBoxAssignments, {
+  DateTime? now,
+}) {
+  final from = now ?? DateTime.now();
   // key "weekday|hour|minute" -> medicines due then
   final Map<String, List<Map<String, String>>> groups = {};
+  // key -> false as soon as one medicine in it continues after this week
+  final Map<String, bool> allEndThisWeek = {};
 
   for (final med in medicines) {
     if (med['isActive'] == false) continue;
@@ -63,15 +73,25 @@ List<PlannedReminder> planWeeklyReminders(
       orElse: () => <String, String>{},
     );
     final slot = (assignment['slot'] ?? '').toUpperCase();
+    final endDate = med['endDate'] as String?;
 
     for (final day in days) {
       final weekday = kDaysOfWeek.indexOf(day) + 1;
       if (weekday == 0) continue;
       for (final t in times) {
+        final next = nextWeeklyAt(weekday, t.hour, t.minute, from: from);
+        if (!runsOn(endDate, next)) continue; // course over before this dose
+        final endsThisWeek = !runsOn(endDate, next.add(const Duration(days: 7)));
         final key = '$weekday|${t.hour}|${t.minute}';
         final list = groups.putIfAbsent(key, () => []);
+        allEndThisWeek[key] = (allEndThisWeek[key] ?? true) && endsThisWeek;
         if (!list.any((m) => m['name'] == name)) {
-          list.add({'name': name, 'dosage': (med['dosage'] ?? '').toString(), 'slot': slot});
+          list.add({
+            'name': name,
+            'dosage': (med['dosage'] ?? '').toString(),
+            'slot': slot,
+            if (endDate != null) 'endDate': endDate,
+          });
         }
       }
     }
@@ -84,6 +104,7 @@ List<PlannedReminder> planWeeklyReminders(
     final weekday = int.parse(parts[0]);
     final time = TimeOfDay(hour: int.parse(parts[1]), minute: int.parse(parts[2]));
     final meds = groups[key]!;
+    final once = allEndThisWeek[key] == true;
     plan.add(PlannedReminder(
       id: reminderIdFor(weekday, time),
       weekday: weekday,
@@ -93,6 +114,7 @@ List<PlannedReminder> planWeeklyReminders(
       // date is left empty: the confirmation dialog uses "today" when it opens.
       payload: jsonEncode({'medicines': meds, 'date': '', 'time': formatTime12h(time)}),
       meds: meds,
+      onceAt: once ? nextWeeklyAt(weekday, time.hour, time.minute, from: from) : null,
     ));
   }
   return plan;
@@ -116,6 +138,7 @@ List<PlannedReminder> planFollowUps(PlannedReminder r) {
           : 'Confirm within 10 minutes or it will be marked as missed and your caregiver will be alerted.',
       payload: r.payload,
       meds: r.meds,
+      onceAt: r.onceAt?.add(offset),
     ));
   }
   return result;
@@ -133,7 +156,9 @@ List<PlannedReminder> planFollowUps(PlannedReminder r) {
       'hour': time.hour,
       'minute': time.minute,
       'time': formatTime12h(r.time),
-      'meds': r.meds.map((m) => {'name': m['name'] ?? '', 'dosage': m['dosage'] ?? ''}).toList(),
+      'meds': r.meds
+          .map((m) => {'name': m['name'] ?? '', 'dosage': m['dosage'] ?? '', 'endDate': m['endDate'] ?? ''})
+          .toList(),
     },
   );
 }
@@ -257,6 +282,24 @@ class ReminderScheduler {
   }
 
   static Future<bool> _schedule(PlannedReminder r, {DateTime? notBefore}) async {
+    final once = r.onceAt;
+    if (once != null) {
+      // Last week of a limited course: ring this one time only.
+      if (notBefore != null && !once.isAfter(notBefore)) return true; // already answered
+      try {
+        await NotificationService().scheduleOneTimeNotification(
+          id: r.id,
+          title: r.title,
+          body: r.body,
+          when: once,
+          payload: r.payload,
+        );
+        return true;
+      } catch (e) {
+        debugPrint('Could not schedule reminder ${r.id}: $e');
+        return false;
+      }
+    }
     try {
       await NotificationService().scheduleWeeklyNotification(
         id: r.id,

@@ -58,3 +58,52 @@ DateTime nextWeeklyAt(int weekday, int hour, int minute, {DateTime? from}) {
   }
   return candidate;
 }
+
+// ---------- Limited-time medicines ("for 1 week", "until Nov 6") ----------
+// A schedule may have `endDate`: its last day, as 'yyyy-MM-dd' (see dateKey).
+// No endDate = ongoing.
+
+DateTime? parseDateKey(String? s) {
+  if (s == null || s.isEmpty) return null;
+  final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(s.trim());
+  if (m == null) return null;
+  return DateTime(int.parse(m.group(1)!), int.parse(m.group(2)!), int.parse(m.group(3)!));
+}
+
+DateTime _dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+/// True if a medicine with this [endDate] is still taken on [day].
+bool runsOn(String? endDate, DateTime day) {
+  final end = parseDateKey(endDate);
+  return end == null || !_dayOnly(day).isAfter(end);
+}
+
+/// End date for a course of [days] days that starts on [from] (default today).
+/// "7 days" starting today ends 6 days from now.
+String endDateForDays(int days, {DateTime? from}) {
+  final start = _dayOnly(from ?? DateTime.now());
+  return dateKey(DateTime(start.year, start.month, start.day + days - 1));
+}
+
+/// Days left including today (0 = already ended), or null when ongoing.
+int? daysLeft(String? endDate, {DateTime? now}) {
+  final end = parseDateKey(endDate);
+  if (end == null) return null;
+  final left = end.difference(_dayOnly(now ?? DateTime.now())).inDays + 1;
+  return left < 0 ? 0 : left;
+}
+
+const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/// "Nov 6".
+String shortDate(DateTime d) => '${_months[d.month - 1]} ${d.day}';
+
+/// "Until Nov 6 (7 days left)", "Last day today", "Ended Nov 6", or "Ongoing".
+String courseText(String? endDate, {DateTime? now}) {
+  final end = parseDateKey(endDate);
+  if (end == null) return 'Ongoing';
+  final left = daysLeft(endDate, now: now)!;
+  if (left == 0) return 'Ended ${shortDate(end)}';
+  if (left == 1) return 'Last day today';
+  return 'Until ${shortDate(end)} ($left days left)';
+}

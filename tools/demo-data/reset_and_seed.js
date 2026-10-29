@@ -47,6 +47,9 @@ const MEDICINES = [
   { name: 'Metformin', dosage: '1 tablet (500 mg)', times: [[8, 0], [20, 0]], days: EVERY_DAY, slot: 'B' },
   { name: 'Atorvastatin', dosage: '1 tablet (20 mg)', times: [[21, 0]], days: EVERY_DAY, slot: 'C' },
   { name: 'Vitamin D3', dosage: '1 capsule (1000 IU)', times: [[9, 0]], days: ['Mon', 'Wed', 'Fri'], slot: 'D' },
+  // Limited-time course: started 3 days ago, 7 days in total (ends in 4 days).
+  { name: 'Amoxicillin', dosage: '1 capsule (500 mg)', times: [[8, 0], [14, 0], [20, 0]], days: EVERY_DAY, slot: 'E',
+    startedDaysAgo: 3, courseDays: 7 },
 ];
 
 // Doses missed in the sample history: [days ago, medicine, "h:mm AM"]. Everything else = taken.
@@ -139,17 +142,21 @@ async function seed() {
   // Medicines (created 2 weeks ago so the History tab shows a full week)
   const created = Timestamp.fromDate(daysAgo(14, 7, 30));
   for (const m of MEDICINES) {
+    const course = m.courseDays
+      ? { endDate: dateKey(manila(daysAgo(m.startedDaysAgo - (m.courseDays - 1), 12))) }
+      : {};
     batch.set(patientRef.collection('schedules').doc(), {
       name: m.name,
       dosage: m.dosage,
       schedules: m.times.map(([hour, minute]) => ({ hour, minute })),
       repeatDays: m.days,
-      createdAt: created,
+      ...course, // last day of a limited course ("for 7 days")
+      createdAt: m.startedDaysAgo != null ? Timestamp.fromDate(daysAgo(m.startedDaysAgo, 7, 30)) : created,
       isActive: true,
     });
   }
 
-  // PillPalBox slots A-D
+  // PillPalBox slots A-E
   batch.update(patientRef, {
     pillbox_assignments: MEDICINES.map((m) => ({ slot: m.slot, medicine: m.name })),
   });
@@ -162,6 +169,7 @@ async function seed() {
     const intakes = [];
     for (const m of MEDICINES) {
       if (!m.days.includes(dayName(day))) continue;
+      if (m.startedDaysAgo != null && n > m.startedDaysAgo) continue; // course not started yet
       for (const [h, mi] of m.times) {
         if (daysAgo(n, h, mi) > now) continue; // not due yet today
         const t = time12(h, mi);
