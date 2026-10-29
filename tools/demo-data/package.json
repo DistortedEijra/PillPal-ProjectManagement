@@ -1,0 +1,11 @@
+{
+  "name": "pillpal-demo-data",
+  "private": true,
+  "description": "Resets the PillPal Firebase project and creates demo accounts with sample data.",
+  "scripts": {
+    "reset": "node reset_and_seed.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

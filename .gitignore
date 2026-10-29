@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# PillPal demo reset: Firebase admin key (never commit)
+tools/demo-data/serviceAccountKey.json
+tools/demo-data/node_modules/
