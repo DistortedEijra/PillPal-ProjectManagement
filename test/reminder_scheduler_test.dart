@@ -117,4 +117,24 @@ void main() {
       expect(planFollowUps(r).map((f) => f.id), [followUpIdFor('5|8|0', 1), followUpIdFor('5|8|0', 2)]);
     });
   });
+
+  group('follow-ups are one-time alarms', () {
+    // Friday 30 Oct 2026; Losartan every Friday 8:00 AM.
+    final r = planWeeklyReminders([med('Losartan', ['Fri'], [eight])], []).single;
+
+    test('before the dose: today at +10 and +20', () {
+      final f = planFollowUps(r, now: DateTime(2026, 10, 30, 7, 0));
+      expect(f.map((x) => x.onceAt), [DateTime(2026, 10, 30, 8, 10), DateTime(2026, 10, 30, 8, 20)]);
+    });
+
+    test('answered at 8:01: both move to next Friday', () {
+      final f = planFollowUps(r, now: DateTime(2026, 10, 30, 8, 1), notBefore: DateTime(2026, 10, 30, 9, 0));
+      expect(f.map((x) => x.onceAt), [DateTime(2026, 11, 6, 8, 10), DateTime(2026, 11, 6, 8, 20)]);
+    });
+
+    test('not answered at 8:15: the +20 one still rings today', () {
+      final f = planFollowUps(r, now: DateTime(2026, 10, 30, 8, 15));
+      expect(f.map((x) => x.onceAt), [DateTime(2026, 11, 6, 8, 10), DateTime(2026, 10, 30, 8, 20)]);
+    });
+  });
 }

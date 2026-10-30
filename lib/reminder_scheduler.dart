@@ -135,12 +135,30 @@ DateTime? followUpsNotBefore(Map<String, int> answered, String reminderKey, Date
 
 /// The +10 and +20 minute follow-up alarms for one reminder. They open the same
 /// Yes/No confirmation as the reminder itself.
-List<PlannedReminder> planFollowUps(PlannedReminder r) {
+///
+/// Follow-ups are always ONE-TIME alarms for the next dose (never weekly):
+/// the notification plugin moves a weekly alarm back to the next matching
+/// day/time no matter which date it is given, so "skip today's follow-ups"
+/// can only work with one-time alarms. Every sync (app opened, any change)
+/// sets them for the next dose again. [notBefore]: the dose was answered, so
+/// nothing may ring before this moment.
+List<PlannedReminder> planFollowUps(PlannedReminder r, {DateTime? now, DateTime? notBefore}) {
+  final from = now ?? DateTime.now();
   final names = r.meds.map((m) => m['name']).join(', ');
   final result = <PlannedReminder>[];
   for (final level in [1, 2]) {
     final offset = level == 1 ? EscalationService.followUp1 : EscalationService.followUp2;
     final (weekday, time) = shiftWeekly(r.weekday, r.time, offset.inMinutes);
+    DateTime at;
+    final once = r.onceAt;
+    if (once != null) {
+      at = once.add(offset); // last week of a limited course
+    } else {
+      at = nextWeeklyAt(weekday, time.hour, time.minute, from: from);
+      while (notBefore != null && !at.isAfter(notBefore)) {
+        at = DateTime(at.year, at.month, at.day + 7, at.hour, at.minute);
+      }
+    }
     result.add(PlannedReminder(
       id: followUpIdFor(r.key, level),
       weekday: weekday,
@@ -151,7 +169,7 @@ List<PlannedReminder> planFollowUps(PlannedReminder r) {
           : 'Confirm within 10 minutes or it will be marked as missed and your caregiver will be alerted.',
       payload: r.payload,
       meds: r.meds,
-      onceAt: r.onceAt?.add(offset),
+      onceAt: at,
     ));
   }
   return result;
@@ -253,8 +271,9 @@ class ReminderScheduler {
     final answered = _loadAnswered(await SharedPreferences.getInstance());
     for (final r in plan) {
       if (generation != _generation) return _abort(notificationIds, backgroundIds);
-      final notBefore = followUpsNotBefore(answered, r.key, DateTime.now());
-      for (final f in planFollowUps(r)) {
+      final now = DateTime.now();
+      final notBefore = followUpsNotBefore(answered, r.key, now);
+      for (final f in planFollowUps(r, now: now, notBefore: notBefore)) {
         if (await _schedule(f, notBefore: notBefore)) notificationIds.add('${f.id}');
       }
     }
@@ -374,10 +393,12 @@ class ReminderScheduler {
     if (_running != null) await _running;
     final reminder = _lastPlan.where((r) => r.key == key);
     if (reminder.isEmpty) return; // the next sync reads the saved answer
-    for (final f in planFollowUps(reminder.first)) {
+    // Anything up to 1 hour after this dose belongs to today's dose: set the
+    // follow-ups for the next week's dose instead.
+    final limit = due.add(const Duration(hours: 1));
+    for (final f in planFollowUps(reminder.first, notBefore: limit)) {
       await NotificationService().cancelNotification(id: f.id);
-      // Anything up to 1 hour after this dose belongs to today's dose.
-      await _schedule(f, notBefore: due.add(const Duration(hours: 1)));
+      await _schedule(f, notBefore: limit);
     }
   }
 

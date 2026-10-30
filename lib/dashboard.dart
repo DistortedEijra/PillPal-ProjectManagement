@@ -52,6 +52,8 @@ class _DashboardPageState extends State<DashboardPage> {
   final CareListeners _careListeners = CareListeners();
   bool _checkInDialogOpen = false;
   bool _remindersScheduled = false; // true once real Android alarms are set
+  // Completes after the first alarm sync (right after opening the app).
+  final Completer<void> _firstSyncDone = Completer<void>();
   // Live updates of the schedules, so edits made by a caregiver show up here
   // and the reminders are re-scheduled.
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _schedulesSub;
@@ -302,6 +304,12 @@ class _DashboardPageState extends State<DashboardPage> {
         ? '${dueMedicines.length} medicines are due.'
         : 'Time to take your ${dueMedicines.first['name']}.';
 
+    // Opened from the notification a moment ago: wait until the alarms are
+    // loaded, or the app would think there are none and start its own
+    // follow-ups (which Yes/No might not cancel).
+    await _firstSyncDone.future.timeout(const Duration(seconds: 20), onTimeout: () {});
+    if (!mounted) return;
+
     // Same id as the scheduled weekly alarm for this time, so the reminder
     // never shows twice.
     final int notificationId =
@@ -465,6 +473,7 @@ class _DashboardPageState extends State<DashboardPage> {
       _remindersScheduled = false;
       log('Could not schedule reminders: $e');
     }
+    if (!_firstSyncDone.isCompleted) _firstSyncDone.complete();
     // Also give the PillPalBox its own copy, so it lights up even when the
     // phone is not connected. (Skipped if the box is not connected right now.)
     _syncPillBox();
