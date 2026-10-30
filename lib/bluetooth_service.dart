@@ -108,6 +108,12 @@ class BluetoothService {
     _connectionStatusController.add(false);
   }
 
+  /// Blinks a PillPalBox slot (A-F) for 1 minute. Sent as a whole line
+  /// ("#B,A"): the box ignores loose letters, so a byte lost while the app
+  /// sends the reminder list can never light a slot by itself.
+  Future<bool> blinkSlot(String slot) =>
+      sendSignal('#B,${slot.trim().toUpperCase()}', appendNewline: true);
+
   Future<bool> sendSignal(String signal, {bool appendNewline = false}) async {
     if (!await connect()) {
       log('Failed to connect before sending signal.');

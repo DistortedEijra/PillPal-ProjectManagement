@@ -1,5 +1,10 @@
 /*
-  PillPalBox v3 - Arduino Uno + HC-05 + 6 slot LEDs (+ optional DS3231 clock)
+  PillPalBox v3.1 - Arduino Uno + HC-05 + 6 slot LEDs (+ optional DS3231 clock)
+
+  v3.1: over Bluetooth the box only accepts whole '#' lines. Loose letters
+  (left over when a '#' byte gets lost while the app sends the reminder list,
+  e.g. the "B" in "#S,B,...") used to blink a slot by themselves. The app now
+  blinks a slot with "#B,<slot>" instead of a bare letter.
 
   NEW in v3: the box remembers the reminders. The PillPal app sends the
   current time and the list of reminders whenever it connects (and whenever
@@ -18,9 +23,10 @@
     Connection LED -> D7
     Optional DS3231: SDA -> A4, SCL -> A5, VCC -> 5V, GND -> GND
 
-  Commands from the app (single characters, as before):
-    A..F blink slot   a..f steady   0 all off   ! stop blinking   ? status
-  Line commands (start with '#', end with newline):
+  Line commands (start with '#', end with newline) - the only commands
+  accepted over Bluetooth:
+    #B,<slot>                 blink a slot for 1 minute (A..F) -> "ACK BLINK A"
+    #0  all off     #!  stop blinking     #?  status
     #T,YYYY,MM,DD,hh,mm,ss    set the clock (phone's local time)  [no reply]
     #C                        start a new reminder list
     #S,<slot>,<days>,hh,mm    add a reminder; days = bits Mon=1,Tue=2,...,Sun=64
@@ -29,6 +35,8 @@
     #O,<uid>,<name>           owner of the next list (saved together with #E)
     #W                        who set up the box -> "OWNER <uid>,<name>" or "OWNER none"
   The same commands can be typed in the Serial Monitor (9600 baud) for testing.
+  The Serial Monitor also takes single characters: A..F blink, a..f steady,
+  0 all off, ! stop, ? status.
 */
 
 #include <SoftwareSerial.h>
@@ -101,8 +109,6 @@ long lastMinuteChecked = -1;
 
 // ---------- connection ----------
 unsigned long lastRxAt = 0;
-unsigned long lastLineAt = 0;              // last time a '#' line character arrived
-const unsigned long LINE_QUIET_MS = 1500;  // ignore single letters this long after line traffic
 bool isConnected = false;
 int lastStateRaw = LOW;
 unsigned long stateChangedAt = 0;
@@ -115,6 +121,7 @@ struct LineReader {
   bool active;
 };
 LineReader btLine = {{0}, 0, false};
+void handleChar(char ch, unsigned long now);
 LineReader usbLine = {{0}, 0, false};
 
 // =====================================================================
@@ -254,9 +261,9 @@ void setClock(int y, int mo, int d, int h, int mi, int s) {
 #if USE_DS3231
   if (rtcOk) rtc.adjust(DateTime(y, mo, d, h, mi, s));
 #endif
-  // Re-check the current minute with the new time (a second blink is harmless,
-  // a skipped reminder is not).
-  lastMinuteChecked = -1;
+  // Not resetting lastMinuteChecked: if the new time is a different minute it
+  // is checked anyway, and the same minute was already handled (re-checking it
+  // made a due slot start blinking again every time the app re-sent the list).
 }
 
 String clockText() {
@@ -350,6 +357,18 @@ void handleLine(const char* s) {
     case 'W':
       sendOwner();
       break;
+    case 'B':  // "#B,A" = blink slot A (what the app sends at the dose time)
+      if (s[1] == ',' && s[2] >= 'A' && s[2] <= 'F' && s[3] == 0) {
+        handleChar(s[2], millis());
+      } else {
+        sendLine(F("ERR B"));
+      }
+      break;
+    case '0':
+    case '!':
+    case '?':
+      if (s[1] == 0) handleChar(s[0], millis());
+      break;
     case 'O': {
       // "#O,<uid>,<name>": the name is everything after the second comma.
       const char* uid = s + 2;
@@ -403,6 +422,10 @@ void handleChar(char ch, unsigned long now) {
 // Returns true if the character was part of a '#' line.
 bool feedLine(LineReader& r, char ch) {
   if (r.active) {
+    if (ch == '#') {  // a newline got lost: start the new line, drop the broken one
+      r.len = 0;
+      return true;
+    }
     if (ch == '\n' || ch == '\r') {
       r.buf[r.len] = 0;
       r.active = false;
@@ -449,7 +472,7 @@ void setup() {
   loadSchedule();
   loadOwner();
   lastRxAt = millis();
-  sendLine(String("READY PillPalBox v3, ") + entryCount + " reminders saved");
+  sendLine(String("READY PillPalBox v3.1, ") + entryCount + " reminders saved");
   sendOwner();
   sendLine(clockText());
 }
@@ -471,19 +494,9 @@ void loop() {
   while (hc05.available()) {
     char ch = (char)hc05.read();
     lastRxAt = now;
-    if (feedLine(btLine, ch)) {  // '#' lines are always accepted
-      lastLineAt = now;
-      continue;
-    }
-    if (!isConnected) continue;  // ignore stray characters when not connected
-    // While the app is sending the reminder list, a damaged line can leave
-    // loose letters behind (for example the "b" in an account id). Ignore
-    // single-letter commands for a moment after line traffic.
-    if (now - lastLineAt < LINE_QUIET_MS) continue;
-    // From Bluetooth only the app's commands: A-F blink, 0 all off, ! stop, ? status.
-    // (a-f "steady on" is for the USB Serial Monitor only.)
-    if (ch >= 'a' && ch <= 'f') continue;
-    handleChar(ch, now);
+    // Only whole '#' lines count. Anything else (a loose letter from a line
+    // whose '#' got lost) is ignored, so it can't light a slot.
+    feedLine(btLine, ch);
   }
 
   // USB Serial Monitor input (for testing)

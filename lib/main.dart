@@ -88,7 +88,7 @@ Future<void> _processNotificationLaunch(
 
   for (final slot in slots) {
     print("Sending Bluetooth signal for slot: $slot");
-    BluetoothService().sendSignal(slot);
+    BluetoothService().blinkSlot(slot);
   }
 }
 

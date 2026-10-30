@@ -270,8 +270,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
       if (assignment.isNotEmpty && assignment['slot'] != null) {
         String slot = (assignment['slot'] ?? '').toUpperCase();
-        // Send as single-character blink command (A..F); slight spacing to avoid coalescing
-        final success = await BluetoothService().sendSignal(slot);
+        final success = await BluetoothService().blinkSlot(slot);
         if (!success && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Failed to send signal to pillbox for $medicineName.')),

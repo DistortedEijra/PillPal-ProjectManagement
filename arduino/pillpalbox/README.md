@@ -51,7 +51,7 @@ The sketch uses the DS3231 by default (`#define USE_DS3231 1`), so install the l
 1. Open `pillpalbox.ino` in Arduino IDE.
 2. Tools → Board → **Arduino Uno**, then Tools → Port → your Uno's COM port.
 3. Upload. The HC-05 can stay wired because it uses D2/D3, not 0/1.
-4. Serial Monitor (9600 baud) shows `READY PillPalBox v3, N reminders saved`. A fast-blinking LED on the HC-05 means it's waiting to pair.
+4. Serial Monitor (9600 baud) shows `READY PillPalBox v3.1, N reminders saved`. A fast-blinking LED on the HC-05 means it's waiting to pair.
 
 If nothing ever arrives, your HC-05 may be set to 38400 baud. Change `hc05.begin(9600)` to `hc05.begin(38400)`.
 
@@ -85,7 +85,9 @@ That sets the clock to 8:40 PM, saves one reminder (slot A, every day, 8:41 PM) 
 
 Add a schedule 1–2 minutes from now. Keep PillPal open, or tap the reminder when it pops up. The slot's LED blinks for 1 minute, and the box replies `ACK BLINK A`.
 
-Other commands: `0` turns all LEDs off, `!` stops blinking, and `?` returns the status. `a`–`f` (steady on) only works from the USB Serial Monitor, not over Bluetooth.
+**v3.1: over Bluetooth the box only accepts whole lines that start with `#`.** The app blinks a slot with `#B,A` (not a bare `A` like before), so the app and the sketch must both be the latest version. Loose letters are ignored, so a byte lost while the app sends the list can't light a slot any more.
+
+Bluetooth commands: `#B,A`…`#B,F` blink a slot, `#0` all LEDs off, `#!` stop blinking, `#?` status. In the USB Serial Monitor the single characters still work for testing: `A`–`F` blink, `a`–`f` steady on, `0`, `!`, `?`.
 
 ## Troubleshooting
 
@@ -96,4 +98,6 @@ Other commands: `0` turns all LEDs off, `!` stops blinking, and `?` returns the 
 - **Box doesn't light by itself:** open PillPal once near the box so it connects (that sends the time and the list). Type `?` in the Serial Monitor: it should show `CLOCK ...` (not "not set") and `SCHED` more than 0. After a power cut without a DS3231, the clock needs the phone again.
 - **Box lights a few minutes early/late:** the Arduino timer drifts; connect the phone to re-sync, or add a DS3231.
 - **Only medicines with a slot** are saved in the box (max 40 reminder times).
-- **A slot LED stays on and won't stop:** send `0` (or unplug the box for a second; the steady state isn't saved). Update to the latest sketch: older versions could pick up a stray letter while the app was sending the list.
+- **A slot lights up when you only changed the slots or a schedule:** update to sketch v3.1 and the latest app. Older versions could turn a letter from the reminder list (for example the `B` in `#S,B,...`) into a blink, and re-blinked a slot whose dose was due that same minute every time the app re-sent the list.
+- **A slot LED stays on and won't stop:** send `#0` (or unplug the box for a second; the steady state isn't saved).
+- **The app's blink does nothing but the box answers `ERR ?`:** the sketch is older than the app. Upload `pillpalbox.ino` v3.1.

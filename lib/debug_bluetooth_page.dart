@@ -75,8 +75,13 @@ class _DebugBluetoothPageState extends State<DebugBluetoothPage> {
   }
 
   Future<void> _send(String s) async {
-    final bool single = _isSingleCharCmd(s);
-    final ok = await BluetoothService().sendSignal(s, appendNewline: !single);
+    // The box (v3.1) only takes whole '#' lines over Bluetooth, so the old
+    // one-letter test commands are sent as lines: A -> "#B,A", ? -> "#?".
+    if (_isSingleCharCmd(s)) {
+      final ch = s.codeUnitAt(0);
+      s = (ch >= 65 && ch <= 70) ? '#B,$s' : '#$s';
+    }
+    final ok = await BluetoothService().sendSignal(s, appendNewline: true);
     _appendLog(ok ? "TX: $s" : "TX FAILED: $s");
   }
 
