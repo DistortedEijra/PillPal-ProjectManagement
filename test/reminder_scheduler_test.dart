@@ -96,4 +96,25 @@ void main() {
     final plan = planWeeklyReminders([med('Losartan', ['Fri'], [eight])], []);
     expect(plan.single.id, reminderIdFor(5, eight));
   });
+
+  group('answered doses', () {
+    // Friday 30 Oct 2026, 8:00 AM dose answered.
+    final due = DateTime(2026, 10, 30, 8, 0);
+    final answered = {'5|8|0': due.millisecondsSinceEpoch};
+
+    test("today's follow-ups stay off after Yes/No", () {
+      final limit = followUpsNotBefore(answered, '5|8|0', DateTime(2026, 10, 30, 8, 2));
+      expect(limit, DateTime(2026, 10, 30, 9, 0)); // so +10 and +20 move to next week
+    });
+
+    test('other reminders and later weeks are not affected', () {
+      expect(followUpsNotBefore(answered, '5|20|0', DateTime(2026, 10, 30, 8, 2)), isNull);
+      expect(followUpsNotBefore(answered, '5|8|0', DateTime(2026, 10, 30, 10, 0)), isNull);
+    });
+
+    test('follow-up ids match the ones the planner uses', () {
+      final r = planWeeklyReminders([med('Losartan', ['Fri'], [eight])], []).single;
+      expect(planFollowUps(r).map((f) => f.id), [followUpIdFor('5|8|0', 1), followUpIdFor('5|8|0', 2)]);
+    });
+  });
 }
